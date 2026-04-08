@@ -14,8 +14,7 @@ import pandas as pd
 # Constants / Defaults
 # ---------------------------------------------------------------------------
 _today = datetime.date.today().strftime("%y%m%d")
-DEFAULT_SRC_DIR = r"D:\\"
-DEFAULT_OUTPUT_DIR = rf"D:\Multimedia\output_{_today}"
+DEFAULT_OUTPUT_DIR = rf"D:\Multimedia\upload\output_{_today}"
 
 DEFAULT_VOLTAGE_COL = "VMeasCh2"   # UI label: 전압 컬럼명 (cur_col)
 DEFAULT_CURRENT_COL = "ID"         # UI label: 전류 컬럼명 (vol_col)
@@ -355,10 +354,9 @@ class App(tk.Tk):
         self.title("File Preprocessor (Tk)")
         self.geometry("980x700")
 
-        self.scanned_files: list[str] = []
+        self.selected_files: list[str] = []
         self.custom_labels: dict[str, list[str]] | None = None
 
-        self.src_dir_var = tk.StringVar(value=DEFAULT_SRC_DIR)
         self.output_dir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
         self.file_type_var = tk.StringVar(value=FILE_TYPES[0])
         self.measure_type_var = tk.StringVar(value=MEASURE_TYPES[0])
@@ -378,18 +376,14 @@ class App(tk.Tk):
         sec1 = ttk.LabelFrame(root, text="1. 파일 선택", padding=10)
         sec1.pack(fill="x")
 
-        ttk.Label(sec1, text="소스 폴더").grid(row=0, column=0, sticky="w")
-        ttk.Entry(sec1, textvariable=self.src_dir_var, width=80).grid(row=0, column=1, padx=6)
-        ttk.Button(sec1, text="찾기", command=self._browse_src).grid(row=0, column=2)
-
-        ttk.Label(sec1, text="File type").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(sec1, text="File type").grid(row=0, column=0, sticky="w")
         file_type_box = ttk.Combobox(sec1, textvariable=self.file_type_var, values=FILE_TYPES, state="readonly", width=10)
-        file_type_box.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        file_type_box.grid(row=0, column=1, sticky="w")
 
-        ttk.Button(sec1, text="Scan", command=self.scan_files).grid(row=1, column=2, pady=(8, 0))
+        ttk.Button(sec1, text="파일 선택(다중)", command=self.select_files).grid(row=0, column=2, padx=(8, 0))
 
         self.file_listbox = tk.Listbox(sec1, selectmode="extended", height=8)
-        self.file_listbox.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        self.file_listbox.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
 
         # 2. 출력 폴더
         sec2 = ttk.LabelFrame(root, text="2. 출력 폴더", padding=10)
@@ -440,11 +434,6 @@ class App(tk.Tk):
         self.log_text = tk.Text(log_frame, height=10)
         self.log_text.pack(fill="both", expand=True)
 
-    def _browse_src(self):
-        path = filedialog.askdirectory(initialdir=self.src_dir_var.get() or "/")
-        if path:
-            self.src_dir_var.set(path)
-
     def _browse_output(self):
         path = filedialog.askdirectory(initialdir=self.output_dir_var.get() or "/")
         if path:
@@ -460,30 +449,26 @@ class App(tk.Tk):
         self.log_text.insert("end", msg + "\n")
         self.log_text.see("end")
 
-    def scan_files(self):
-        src_dir = self.src_dir_var.get().strip()
+    def select_files(self):
         file_type = self.file_type_var.get().strip()
-
-        if not os.path.isdir(src_dir):
-            messagebox.showerror("오류", f"폴더를 찾을 수 없습니다: {src_dir}")
+        pattern = _EXT_MAP.get(file_type, "*.*")
+        selected = filedialog.askopenfilenames(
+            title="처리할 파일 선택 (다중 선택 가능)",
+            filetypes=[(f"{file_type} files", pattern), ("All files", "*.*")],
+        )
+        if not selected:
             return
 
-        found = scan_directory(src_dir, file_type)
-        self.scanned_files = found
-
+        self.selected_files = list(selected)
         self.file_listbox.delete(0, "end")
-        for path in found:
+        for path in self.selected_files:
             self.file_listbox.insert("end", path)
 
-        for i in range(len(found)):
+        for i in range(len(self.selected_files)):
             self.file_listbox.selection_set(i)
 
-        if found:
-            self.status_var.set(f"{len(found)}개 파일 발견")
-            self._append_log(f"[INFO] Scan 완료: {len(found)}개")
-        else:
-            self.status_var.set("파일 없음")
-            self._append_log(f"[WARN] {src_dir} 에서 {file_type} 파일을 찾지 못했습니다.")
+        self.status_var.set(f"{len(self.selected_files)}개 파일 선택됨")
+        self._append_log(f"[INFO] 파일 선택 완료: {len(self.selected_files)}개")
 
     def _selected_files(self) -> list[str]:
         indices = self.file_listbox.curselection()
@@ -497,7 +482,7 @@ class App(tk.Tk):
     def configure_custom_labels(self):
         selected = self._selected_files()
         if not selected:
-            messagebox.showwarning("안내", "먼저 파일을 스캔하고 1개 이상 선택하세요.")
+            messagebox.showwarning("안내", "먼저 파일을 1개 이상 선택하세요.")
             return
 
         try:
@@ -520,7 +505,7 @@ class App(tk.Tk):
     def process(self):
         selected_files = self._selected_files()
         if not selected_files:
-            messagebox.showerror("오류", "처리할 파일을 선택해 주세요. (Scan 후 파일을 선택하세요)")
+            messagebox.showerror("오류", "처리할 파일을 선택해 주세요.")
             return
 
         if self.measure_type_var.get() == "Custom" and not self.custom_labels:
