@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import datetime
+import glob
+import os
 
 import numpy as np
 import pandas as pd
@@ -10,8 +11,8 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Constants / Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_INIT_DIR = r"D:\\"
 _today = datetime.date.today().strftime("%y%m%d")
+DEFAULT_SRC_DIR = r"D:\\"
 DEFAULT_OUTPUT_DIR = rf"D:\Multimedia\output_{_today}"
 
 DEFAULT_VOLTAGE_COL = "VMeasCh2"   # UI label: 전압 컬럼명 (cur_col)
@@ -25,16 +26,17 @@ MAX_ROWS = 100
 MEASURE_TYPES = ["ISPP", "Endurance", "Retention", "Custom"]
 FILE_TYPES = ["xls", "nasca", "csv"]
 
+_EXT_MAP = {"xls": "*.xls", "nasca": "*.xls", "csv": "*.csv"}
+
 
 # ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
 
-def load_xls(file_obj) -> pd.DataFrame:
-    """Load a legacy .xls file from an in-memory buffer using xlrd."""
+def load_xls(filepath: str) -> pd.DataFrame:
+    """Load a legacy .xls file from a filesystem path using xlrd."""
     import xlrd
-    data = file_obj.read()
-    wb = xlrd.open_workbook(file_contents=data)
+    wb = xlrd.open_workbook(filepath)
     sheet = wb.sheet_by_index(0)
     headers = sheet.row_values(0)
     rows = [sheet.row_values(r) for r in range(1, sheet.nrows)]
@@ -59,22 +61,27 @@ def load_nasca(filepath: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=headers)
 
 
-def load_csv(file_obj) -> pd.DataFrame:
-    """Load a CSV file."""
-    return pd.read_csv(file_obj)
+def load_csv(filepath: str) -> pd.DataFrame:
+    """Load a CSV file from a filesystem path."""
+    return pd.read_csv(filepath)
 
 
-def load_file(uploaded_file, file_type: str, init_dir: str) -> pd.DataFrame:
+def load_file(filepath: str, file_type: str) -> pd.DataFrame:
     """Dispatch to the appropriate loader based on file_type."""
     if file_type == "xls":
-        return load_xls(uploaded_file)
+        return load_xls(filepath)
     elif file_type == "nasca":
-        filepath = os.path.join(init_dir, uploaded_file.name)
         return load_nasca(filepath)
     elif file_type == "csv":
-        return load_csv(uploaded_file)
+        return load_csv(filepath)
     else:
         raise ValueError(f"Unknown file type: {file_type}")
+
+
+def scan_directory(src_dir: str, file_type: str) -> list:
+    """Return sorted list of full file paths in src_dir matching file_type."""
+    pattern = os.path.join(src_dir, _EXT_MAP.get(file_type, "*.*"))
+    return sorted(glob.glob(pattern))
 
 
 # ---------------------------------------------------------------------------
@@ -95,11 +102,9 @@ def detect_subsets(df: pd.DataFrame, min_interval: float) -> list:
         )
 
     df = df.copy()
-    # Ensure the time column is numeric
     df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
 
     diff = df[TIME_COL].diff()
-    # Mark the first row as a split point too so we always start a new subset
     split_mask = (diff >= min_interval) | (diff.isna())
     split_indices = df.index[split_mask].tolist()
 
@@ -142,10 +147,7 @@ def label_subsets(
         for i, subset in enumerate(subsets):
             s = subset.copy()
             for col_name, values in custom_labels.items():
-                if i < len(values):
-                    s[col_name] = values[i]
-                else:
-                    s[col_name] = ""
+                s[col_name] = values[i] if i < len(values) else ""
             labeled.append(s)
         return labeled
 
@@ -174,8 +176,7 @@ def keep_and_rename_columns(
         rename_map[voltage_col] = "voltage"
     if current_col in df.columns:
         rename_map[current_col] = "current"
-    df = df.rename(columns=rename_map)
-    return df
+    return df.rename(columns=rename_map)
 
 
 def downsample(subset_df: pd.DataFrame, max_rows: int = MAX_ROWS) -> pd.DataFrame:
@@ -191,9 +192,8 @@ def downsample(subset_df: pd.DataFrame, max_rows: int = MAX_ROWS) -> pd.DataFram
 # ---------------------------------------------------------------------------
 
 def process_files(
-    uploaded_files,
+    file_paths: list,
     file_type: str,
-    init_dir: str,
     output_dir: str,
     voltage_col: str,
     current_col: str,
@@ -212,24 +212,24 @@ def process_files(
     saved_paths = []
 
     progress = st.progress(0, text="Starting…")
-    total = len(uploaded_files)
+    total = len(file_paths)
 
-    for idx, uf in enumerate(uploaded_files):
-        progress.progress((idx) / total, text=f"Processing {uf.name}…")
+    for idx, filepath in enumerate(file_paths):
+        fname = os.path.basename(filepath)
+        progress.progress(idx / total, text=f"Processing {fname}…")
         try:
             # 1. Load
-            df = load_file(uf, file_type, init_dir)
+            df = load_file(filepath, file_type)
 
             # 2. Detect subsets
             subsets = detect_subsets(df, min_interval)
             if not subsets:
-                st.warning(f"{uf.name}: no subsets detected — skipping.")
+                st.warning(f"{fname}: subset이 감지되지 않았습니다 — 건너뜁니다.")
                 continue
 
             # 3. Extract parameters per subset
             param_dicts = [extract_parameters(s) for s in subsets]
 
-            # Attach extracted params as columns (currently all empty)
             param_cols = []
             for i, (s, params) in enumerate(zip(subsets, param_dicts)):
                 for k, v in params.items():
@@ -240,10 +240,11 @@ def process_files(
             # 4. Label subsets
             subsets = label_subsets(subsets, measure_type, custom_labels)
 
-            # Determine label columns added by labeling
-            label_cols = list(custom_labels.keys()) if (
-                measure_type == "Custom" and custom_labels
-            ) else []
+            label_cols = (
+                list(custom_labels.keys())
+                if measure_type == "Custom" and custom_labels
+                else []
+            )
 
             # 5. Trim, rename, and downsample each subset
             extra_cols = param_cols + label_cols
@@ -255,15 +256,15 @@ def process_files(
 
             # 6. Concatenate and save
             result_df = pd.concat(processed_subsets, ignore_index=True)
-            stem = os.path.splitext(uf.name)[0]
+            stem = os.path.splitext(fname)[0]
             out_path = os.path.join(output_dir, f"{stem}_processed.csv")
             result_df.to_csv(out_path, index=False)
             saved_paths.append(out_path)
 
         except Exception as e:
-            st.error(f"Error processing {uf.name}: {e}")
+            st.error(f"{fname} 처리 중 오류: {e}")
 
-    progress.progress(1.0, text="Done.")
+    progress.progress(1.0, text="완료.")
     return saved_paths
 
 
@@ -275,6 +276,7 @@ def _init_session_state():
     defaults = {
         "subset_count": 0,
         "label_headers": [],
+        "scanned_files": [],
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -282,84 +284,76 @@ def _init_session_state():
 
 
 def render_custom_label_ui(
-    uploaded_files,
+    file_paths: list,
     file_type: str,
-    init_dir: str,
     min_interval: float,
 ) -> dict | None:
     """
-    Render the Custom measure-type UI:
-      - "subset check" button
-      - Add / Remove label column buttons
-      - Per-column: editable header + one value input per subset
+    Custom Measure Type 전용 UI:
+      - "subset check" 버튼
+      - 라벨 컬럼 추가 / 제거 버튼
+      - 컬럼별 헤더 입력 + subset 수만큼 값 입력
 
-    Returns a dict {col_name: [val_per_subset]} or None if count is 0.
+    Returns {col_name: [val_per_subset]} or None.
     """
     st.subheader("Custom Labeling")
 
-    # ── Subset check ────────────────────────────────────────────────────────
+    # ── Subset check ─────────────────────────────────────────────────────────
     if st.button("subset check"):
-        if not uploaded_files:
-            st.warning("Upload at least one file before running subset check.")
+        if not file_paths:
+            st.warning("먼저 파일을 스캔하고 선택해 주세요.")
         else:
             try:
-                df = load_file(uploaded_files[0], file_type, init_dir)
+                df = load_file(file_paths[0], file_type)
                 subsets = detect_subsets(df, min_interval)
                 st.session_state.subset_count = len(subsets)
-                # Reset label value keys so stale data doesn't carry over
             except Exception as e:
-                st.error(f"Subset check failed: {e}")
+                st.error(f"Subset check 실패: {e}")
             st.rerun()
 
     n = st.session_state.subset_count
     if n > 0:
-        st.info(f"{n} subset(s) detected.")
+        st.info(f"{n}개 subset 감지됨.")
 
-        # ── Add / Remove label columns ───────────────────────────────────────
-        btn_col1, btn_col2 = st.columns([1, 1])
+        # ── Add / Remove label columns ────────────────────────────────────────
+        btn_col1, btn_col2 = st.columns(2)
         with btn_col1:
             if st.button("+ Add label column"):
-                new_name = f"label_{len(st.session_state.label_headers) + 1}"
-                st.session_state.label_headers.append(new_name)
+                st.session_state.label_headers.append(
+                    f"label_{len(st.session_state.label_headers) + 1}"
+                )
                 st.rerun()
         with btn_col2:
             if st.button("- Remove last") and st.session_state.label_headers:
                 st.session_state.label_headers.pop()
                 st.rerun()
 
-        # ── Per-column inputs ────────────────────────────────────────────────
+        # ── Per-column inputs ─────────────────────────────────────────────────
         for i in range(len(st.session_state.label_headers)):
             st.markdown(f"**Label column {i + 1}**")
-            header_key = f"header_name_{i}"
             st.text_input(
                 "Column name",
                 value=st.session_state.label_headers[i],
-                key=header_key,
+                key=f"header_name_{i}",
             )
 
-            # Lay out value inputs in rows of up to 4
             cols_per_row = 4
             for row_start in range(0, n, cols_per_row):
                 row_cols = st.columns(min(cols_per_row, n - row_start))
                 for j_offset, col in enumerate(row_cols):
                     j = row_start + j_offset
-                    col.text_input(
-                        f"Subset {j + 1}",
-                        key=f"label_val_{i}_{j}",
-                    )
+                    col.text_input(f"Subset {j + 1}", key=f"label_val_{i}_{j}")
 
             st.divider()
 
-        # ── Collect current values ───────────────────────────────────────────
+        # ── Collect values ────────────────────────────────────────────────────
         result = {}
         for i in range(len(st.session_state.label_headers)):
             col_name = st.session_state.get(
-                f"header_name_{i}",
-                st.session_state.label_headers[i],
+                f"header_name_{i}", st.session_state.label_headers[i]
             )
             values = [
-                st.session_state.get(f"label_val_{i}_{j}", "")
-                for j in range(n)
+                st.session_state.get(f"label_val_{i}_{j}", "") for j in range(n)
             ]
             result[col_name] = values
         return result if result else None
@@ -377,41 +371,56 @@ def main():
 
     st.title("File Preprocessor")
 
-    # ── File upload ──────────────────────────────────────────────────────────
-    st.subheader("1. Upload Files")
-    uploaded_files = st.file_uploader(
-        "Select files to process",
-        accept_multiple_files=True,
-        type=["xls", "xlsx", "csv"],
-    )
+    # ── 1. 파일 선택 (경로 기반) ──────────────────────────────────────────────
+    st.subheader("1. 파일 선택")
 
-    # ── Directories ──────────────────────────────────────────────────────────
-    st.subheader("2. Directories")
-    dir_col1, dir_col2 = st.columns(2)
-    with dir_col1:
-        init_dir = st.text_input("Initial directory", value=DEFAULT_INIT_DIR)
-    with dir_col2:
-        output_dir = st.text_input("Output folder", value=DEFAULT_OUTPUT_DIR)
+    scan_col1, scan_col2 = st.columns([3, 1])
+    with scan_col1:
+        src_dir = st.text_input("소스 폴더 경로", value=DEFAULT_SRC_DIR)
+    with scan_col2:
+        # File type을 여기서 먼저 결정해야 Scan에 쓸 수 있음 — 임시로 session state 활용
+        pass  # file_type은 아래 Section 3에서 결정
 
-    # ── Processing parameters ────────────────────────────────────────────────
-    st.subheader("3. Processing Parameters")
-    param_col1, param_col2, param_col3 = st.columns(3)
+    # File type (Section 3보다 먼저 선언해야 Scan 버튼에서 사용 가능)
+    # → 레이아웃 편의상 Section 3보다 위로 올림
+    file_type = st.radio("File type", FILE_TYPES, horizontal=True)
+    if file_type == "nasca":
+        st.info("nasca 모드: xlwings(Windows + Excel 필요)를 사용합니다.")
 
-    with param_col1:
-        file_type = st.radio("File type", FILE_TYPES)
-        if file_type == "nasca":
-            st.info(
-                "nasca mode uses xlwings (Windows + Excel required). "
-                "Files must already exist at the Initial directory path."
-            )
+    if st.button("Scan"):
+        if not os.path.isdir(src_dir):
+            st.error(f"폴더를 찾을 수 없습니다: {src_dir}")
+        else:
+            found = scan_directory(src_dir, file_type)
+            st.session_state.scanned_files = found
+            if not found:
+                st.warning(f"{src_dir} 에서 {file_type} 파일을 찾지 못했습니다.")
+            st.rerun()
+
+    scanned = st.session_state.scanned_files
+    if scanned:
+        st.info(f"{len(scanned)}개 파일 발견.")
+        selected_files = st.multiselect(
+            "처리할 파일 선택",
+            options=scanned,
+            default=scanned,
+            format_func=os.path.basename,
+        )
+    else:
+        st.caption("폴더 경로를 입력하고 Scan 버튼을 눌러 파일 목록을 불러오세요.")
+        selected_files = []
+
+    # ── 2. 출력 폴더 ──────────────────────────────────────────────────────────
+    st.subheader("2. 출력 폴더")
+    output_dir = st.text_input("Output folder", value=DEFAULT_OUTPUT_DIR)
+
+    # ── 3. 처리 파라미터 ──────────────────────────────────────────────────────
+    st.subheader("3. 처리 파라미터")
+    param_col2, param_col3 = st.columns(2)
 
     with param_col2:
-        voltage_col = st.text_input(
-            "전압 컬럼명 (cur_col)", value=DEFAULT_VOLTAGE_COL
-        )
-        current_col = st.text_input(
-            "전류 컬럼명 (vol_col)", value=DEFAULT_CURRENT_COL
-        )
+        voltage_col = st.text_input("전압 컬럼명 (cur_col)", value=DEFAULT_VOLTAGE_COL)
+        current_col = st.text_input("전류 컬럼명 (vol_col)", value=DEFAULT_CURRENT_COL)
 
     with param_col3:
         thres_cur = st.number_input(
@@ -427,29 +436,26 @@ def main():
             step=1e-6,
         )
 
-    # ── Measure Type ─────────────────────────────────────────────────────────
+    # ── 4. Measure Type ───────────────────────────────────────────────────────
     st.subheader("4. Measure Type")
     measure_type = st.selectbox("Measure Type", MEASURE_TYPES)
 
-    # ── Custom UI (conditional) ──────────────────────────────────────────────
+    # ── Custom UI (조건부) ────────────────────────────────────────────────────
     custom_labels = None
     if measure_type == "Custom":
         st.divider()
-        custom_labels = render_custom_label_ui(
-            uploaded_files, file_type, init_dir, min_interval
-        )
+        custom_labels = render_custom_label_ui(selected_files, file_type, min_interval)
 
-    # ── Process ──────────────────────────────────────────────────────────────
+    # ── Process ───────────────────────────────────────────────────────────────
     st.divider()
     if st.button("Process", type="primary"):
-        if not uploaded_files:
-            st.error("Please upload at least one file before processing.")
+        if not selected_files:
+            st.error("처리할 파일을 선택해 주세요. (Scan 후 파일을 선택하세요)")
         else:
-            with st.spinner("Processing files…"):
+            with st.spinner("파일 처리 중…"):
                 saved = process_files(
-                    uploaded_files=uploaded_files,
+                    file_paths=selected_files,
                     file_type=file_type,
-                    init_dir=init_dir,
                     output_dir=output_dir,
                     voltage_col=voltage_col,
                     current_col=current_col,
@@ -460,11 +466,11 @@ def main():
                 )
             if saved:
                 st.success(
-                    f"Saved {len(saved)} file(s):\n"
+                    f"{len(saved)}개 파일 저장 완료:\n"
                     + "\n".join(f"- `{p}`" for p in saved)
                 )
             else:
-                st.warning("No files were saved. Check errors above.")
+                st.warning("저장된 파일이 없습니다. 위의 오류 메시지를 확인하세요.")
 
 
 main()
