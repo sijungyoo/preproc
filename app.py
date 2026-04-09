@@ -422,7 +422,6 @@ def process_files(
 
     Returns a list of saved file paths.
     """
-    del thres_cur  # reserved for future parameter extraction
     os.makedirs(output_dir, exist_ok=True)
     saved_paths: list[str] = []
 
