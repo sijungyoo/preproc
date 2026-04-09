@@ -26,8 +26,30 @@ MAX_ROWS = 100
 
 MEASURE_TYPES = ["ISPP", "Endurance", "Retention", "Custom"]
 FILE_TYPES = ["xls", "nasca", "csv"]
+POLARITIES = ["PGM", "ERS", "PGM/ERS", "ERS/PGM"]
 
 _EXT_MAP = {"xls": "*.xls", "nasca": "*.xls", "csv": "*.csv"}
+
+DEFAULT_MEASURE_CONFIG = {
+    "ISPP": {
+        "target_params": "V_min,V_max,V_step",
+        "label_header": "Write_V",
+        "condition_params": "",
+        "polarity": "PGM",
+    },
+    "Retention": {
+        "target_params": "Retention_min,Retention_max",
+        "label_header": "Retention",
+        "condition_params": "",
+        "polarity": "PGM",
+    },
+    "Endurance": {
+        "target_params": "Cycle",
+        "label_header": "Cycle",
+        "condition_params": "",
+        "polarity": "PGM",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +102,62 @@ def load_file(filepath: str, file_type: str) -> pd.DataFrame:
     raise ValueError(f"Unknown file type: {file_type}")
 
 
+def _find_metadata_header_row(rows: list[list]) -> int:
+    for i, row in enumerate(rows):
+        normalized = [str(v).strip().lower() for v in row]
+        if "parameter name" in normalized and "value" in normalized:
+            return i
+    raise ValueError("Sheet3에서 'Parameter Name' / 'Value' 헤더를 찾지 못했습니다.")
+
+
+def load_metadata_from_sheet3(filepath: str, file_type: str) -> dict[str, str]:
+    """Extract metadata table from Sheet3 where columns are Parameter Name and Value."""
+    rows: list[list]
+    if file_type == "xls":
+        import xlrd
+
+        wb = xlrd.open_workbook(filepath)
+        if wb.nsheets < 3:
+            raise ValueError("xls 파일에 Sheet3(3번째 시트)가 없습니다.")
+        sheet = wb.sheet_by_index(2)
+        rows = [sheet.row_values(r) for r in range(sheet.nrows)]
+    elif file_type == "nasca":
+        import xlwings as xw
+
+        app = xw.App(visible=False)
+        try:
+            wb = app.books.open(filepath)
+            if len(wb.sheets) < 3:
+                raise ValueError("nasca 파일에 Sheet3(3번째 시트)가 없습니다.")
+            data = wb.sheets[2].used_range.value
+            wb.close()
+        finally:
+            app.quit()
+        if not data:
+            raise ValueError("Sheet3 데이터가 비어 있습니다.")
+        rows = data if isinstance(data[0], list) else [data]
+    else:
+        raise ValueError("Sheet3 metadata는 xls/nasca 에서만 지원됩니다.")
+
+    header_row = _find_metadata_header_row(rows)
+    headers = [str(v).strip() for v in rows[header_row]]
+    p_idx = next(i for i, h in enumerate(headers) if h.lower() == "parameter name")
+    v_idx = next(i for i, h in enumerate(headers) if h.lower() == "value")
+
+    meta: dict[str, str] = {}
+    for row in rows[header_row + 1:]:
+        if max(p_idx, v_idx) >= len(row):
+            continue
+        name = str(row[p_idx]).strip()
+        if not name:
+            continue
+        val = str(row[v_idx]).strip()
+        meta[name] = val
+    if not meta:
+        raise ValueError("Sheet3 metadata table에서 유효한 값을 찾지 못했습니다.")
+    return meta
+
+
 def scan_directory(src_dir: str, file_type: str) -> list[str]:
     """Return sorted list of full file paths in src_dir matching file_type."""
     pattern = os.path.join(src_dir, _EXT_MAP.get(file_type, "*.*"))
@@ -120,19 +198,128 @@ def detect_subsets(df: pd.DataFrame, min_interval: float) -> list[pd.DataFrame]:
     return subsets
 
 
-def extract_parameters(subset_df: pd.DataFrame) -> dict:
-    """
-    Extract parameters from a single subset.
+def extract_parameters(
+    subset_df: pd.DataFrame,
+    voltage_col: str,
+    current_col: str,
+    thres_cur: float,
+) -> dict:
+    """Extract vth, vth_2, ss from a subset."""
+    if TIME_COL not in subset_df.columns:
+        raise KeyError(f"Column '{TIME_COL}' not found.")
+    if voltage_col not in subset_df.columns:
+        raise KeyError(f"Voltage column '{voltage_col}' not found.")
+    if current_col not in subset_df.columns:
+        raise KeyError(f"Current column '{current_col}' not found.")
 
-    TODO: implement parameter extraction logic (e.g. Vth, Ion, Ioff, …).
-    """
-    return {}
+    s = subset_df[[TIME_COL, voltage_col, current_col]].copy()
+    s[TIME_COL] = pd.to_numeric(s[TIME_COL], errors="coerce")
+    s[voltage_col] = pd.to_numeric(s[voltage_col], errors="coerce")
+    s[current_col] = pd.to_numeric(s[current_col], errors="coerce")
+    s = s.dropna(subset=[TIME_COL, voltage_col, current_col])
+    s = s.sort_values(TIME_COL)
+    if s.empty:
+        raise ValueError("subset에 유효한 숫자 데이터가 없습니다.")
+
+    def _first_v_at_threshold(threshold: float) -> float:
+        hit = s[s[current_col] >= threshold]
+        if hit.empty:
+            return float("nan")
+        return float(hit.iloc[0][voltage_col])
+
+    vth = _first_v_at_threshold(thres_cur)
+    vth_2 = _first_v_at_threshold(thres_cur / 10.0)
+    ss = vth - vth_2 if pd.notna(vth) and pd.notna(vth_2) else float("nan")
+    return {"vth": vth, "vth_2": vth_2, "ss": ss}
+
+
+def _to_float(meta: dict[str, str], key: str) -> float:
+    if key not in meta:
+        raise KeyError(f"Sheet3 metadata에 '{key}'가 없습니다.")
+    return float(str(meta[key]).replace(",", ""))
+
+
+def build_measure_labels(
+    measure_type: str,
+    meta: dict[str, str],
+    target_params: list[str],
+) -> list[float]:
+    if measure_type == "ISPP":
+        if len(target_params) != 3:
+            raise ValueError("ISPP target_params는 3개(V_min,V_max,V_step)여야 합니다.")
+        v_min = _to_float(meta, target_params[0])
+        v_max = _to_float(meta, target_params[1])
+        v_step = _to_float(meta, target_params[2])
+        if v_step <= 0:
+            raise ValueError("V_step은 양수여야 합니다.")
+        labels = []
+        cur = v_min
+        guard = 0
+        while cur <= v_max + (abs(v_step) * 1e-9):
+            labels.append(cur)
+            cur += v_step
+            guard += 1
+            if guard > 1_000_000:
+                raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
+        if labels and labels[-1] > v_max:
+            labels[-1] = v_max
+        return labels
+
+    if measure_type == "Retention":
+        if len(target_params) != 2:
+            raise ValueError("Retention target_params는 2개(Retention_min,Retention_max)여야 합니다.")
+        r_min = _to_float(meta, target_params[0])
+        r_max = _to_float(meta, target_params[1])
+        if r_min <= 0 or r_max <= 0:
+            raise ValueError("Retention_min/max는 양수여야 합니다.")
+        labels = []
+        cur = r_min
+        while cur < r_max:
+            labels.append(cur)
+            cur *= 10
+        labels.append(r_max if cur > r_max else cur)
+        return labels
+
+    if measure_type == "Endurance":
+        if len(target_params) != 1:
+            raise ValueError("Endurance target_params는 1개(Cycle)여야 합니다.")
+        cycle = _to_float(meta, target_params[0])
+        labels = [0.0, 1.0]
+        cur = 10.0
+        while cur < cycle:
+            labels.append(cur)
+            cur *= 10
+        labels.append(cycle if cur > cycle else cur)
+        # 중복 제거(예: cycle=1)
+        dedup = []
+        for v in labels:
+            if not dedup or dedup[-1] != v:
+                dedup.append(v)
+        return dedup
+
+    raise ValueError(f"지원하지 않는 measure type: {measure_type}")
+
+
+def build_polarities(base_polarity: str, label_count: int) -> list[str]:
+    if base_polarity in {"PGM", "ERS"}:
+        return [base_polarity] * label_count
+    if base_polarity in {"PGM/ERS", "ERS/PGM"}:
+        a, b = base_polarity.split("/")
+        out = []
+        for _ in range(label_count):
+            out.extend([a, b])
+        return out
+    raise ValueError(f"지원하지 않는 polarity: {base_polarity}")
 
 
 def label_subsets(
     subsets: list[pd.DataFrame],
     measure_type: str,
     custom_labels: dict[str, list[str]] | None = None,
+    label_header: str | None = None,
+    labels: list[float] | None = None,
+    polarity_values: list[str] | None = None,
+    condition_values: dict[str, str] | None = None,
 ) -> list[pd.DataFrame]:
     """
     Add labeling columns to each subset DataFrame.
@@ -153,7 +340,29 @@ def label_subsets(
             labeled.append(s)
         return labeled
 
-    # TODO: implement ISPP / Endurance / Retention labeling
+    if measure_type in {"ISPP", "Endurance", "Retention"}:
+        if not label_header or labels is None or polarity_values is None:
+            raise ValueError("measure type labeling을 위한 설정이 부족합니다.")
+        if len(subsets) != len(polarity_values):
+            raise ValueError(
+                f"subset 개수({len(subsets)})와 polarity 할당 개수({len(polarity_values)})가 일치하지 않습니다."
+            )
+
+        labeled = []
+        divisor = len(subsets) // len(labels) if labels else 1
+        if divisor not in (1, 2):
+            raise ValueError("subset 과 label 대응 비율이 올바르지 않습니다.")
+        for i, subset in enumerate(subsets):
+            s = subset.copy()
+            label_idx = i // divisor
+            s[label_header] = labels[label_idx]
+            s["polarity"] = polarity_values[i]
+            if condition_values:
+                for k, v in condition_values.items():
+                    s[k] = v
+            labeled.append(s)
+        return labeled
+
     return [s.copy() for s in subsets]
 
 
@@ -203,6 +412,7 @@ def process_files(
     min_interval: float,
     measure_type: str,
     custom_labels: dict[str, list[str]] | None,
+    measure_config: dict | None,
     on_progress=None,
     on_message=None,
 ) -> list[str]:
@@ -233,7 +443,10 @@ def process_files(
                 continue
 
             # 3. Extract parameters per subset
-            param_dicts = [extract_parameters(s) for s in subsets]
+            param_dicts = [
+                extract_parameters(s, voltage_col, current_col, thres_cur)
+                for s in subsets
+            ]
 
             param_cols = []
             for i, params in enumerate(param_dicts):
@@ -243,13 +456,37 @@ def process_files(
                         param_cols.append(k)
 
             # 4. Label subsets
-            subsets = label_subsets(subsets, measure_type, custom_labels)
-
-            label_cols = (
-                list(custom_labels.keys())
-                if measure_type == "Custom" and custom_labels
-                else []
-            )
+            label_cols = []
+            if measure_type == "Custom":
+                subsets = label_subsets(subsets, measure_type, custom_labels)
+                label_cols = list(custom_labels.keys()) if custom_labels else []
+            else:
+                if file_type not in {"xls", "nasca"}:
+                    raise ValueError("ISPP/Retention/Endurance labeling은 xls/nasca 에서만 지원됩니다.")
+                if not measure_config:
+                    raise ValueError("Measure 설정값이 없습니다.")
+                meta = load_metadata_from_sheet3(filepath, file_type)
+                target_params = [p.strip() for p in measure_config.get("target_params", "").split(",") if p.strip()]
+                label_header = measure_config.get("label_header", "").strip()
+                polarity = measure_config.get("polarity", "PGM").strip()
+                labels = build_measure_labels(measure_type, meta, target_params)
+                polarity_values = build_polarities(polarity, len(labels))
+                if len(subsets) != len(polarity_values):
+                    raise ValueError(
+                        f"subset 개수({len(subsets)})와 label x polarity 개수({len(polarity_values)})가 일치하지 않습니다."
+                    )
+                condition_params = [p.strip() for p in measure_config.get("condition_params", "").split(",") if p.strip()]
+                condition_values = {k: meta.get(k, "") for k in condition_params}
+                subsets = label_subsets(
+                    subsets,
+                    measure_type,
+                    custom_labels=None,
+                    label_header=label_header,
+                    labels=labels,
+                    polarity_values=polarity_values,
+                    condition_values=condition_values,
+                )
+                label_cols = [label_header, "polarity"] + list(condition_values.keys())
 
             # 5. Trim, rename, and downsample each subset
             extra_cols = param_cols + label_cols
@@ -348,6 +585,58 @@ class CustomLabelDialog(tk.Toplevel):
         self.destroy()
 
 
+class MeasureConfigDialog(tk.Toplevel):
+    def __init__(self, master, measure_type: str, current_config: dict):
+        super().__init__(master)
+        self.title(f"{measure_type} 설정")
+        self.measure_type = measure_type
+        self.result: dict | None = None
+
+        self.target_params_var = tk.StringVar(value=current_config.get("target_params", ""))
+        self.label_header_var = tk.StringVar(value=current_config.get("label_header", ""))
+        self.condition_params_var = tk.StringVar(value=current_config.get("condition_params", ""))
+        self.polarity_var = tk.StringVar(value=current_config.get("polarity", "PGM"))
+
+        self._build()
+        self.transient(master)
+        self.grab_set()
+
+    def _build(self):
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Target Parameter Name(s) (콤마 구분)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=self.target_params_var, width=50).grid(row=1, column=0, sticky="we", pady=(2, 8))
+
+        ttk.Label(frm, text="Subset Label Column Header").grid(row=2, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=self.label_header_var, width=50).grid(row=3, column=0, sticky="we", pady=(2, 8))
+
+        ttk.Label(frm, text="Append Condition Parameter Name(s) (콤마 구분)").grid(row=4, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=self.condition_params_var, width=50).grid(row=5, column=0, sticky="we", pady=(2, 8))
+
+        ttk.Label(frm, text="Polarity").grid(row=6, column=0, sticky="w")
+        ttk.Combobox(frm, textvariable=self.polarity_var, values=POLARITIES, state="readonly", width=20).grid(row=7, column=0, sticky="w", pady=(2, 8))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=8, column=0, sticky="e")
+        ttk.Button(btns, text="취소", command=self.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="확인", command=self._save).pack(side="right")
+
+    def _save(self):
+        label_header = self.label_header_var.get().strip()
+        target_params = self.target_params_var.get().strip()
+        if not label_header or not target_params:
+            messagebox.showerror("입력 오류", "target params와 label header는 필수입니다.", parent=self)
+            return
+        self.result = {
+            "target_params": target_params,
+            "label_header": label_header,
+            "condition_params": self.condition_params_var.get().strip(),
+            "polarity": self.polarity_var.get().strip(),
+        }
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -356,6 +645,9 @@ class App(tk.Tk):
 
         self.selected_files: list[str] = []
         self.custom_labels: dict[str, list[str]] | None = None
+        self.measure_configs = {
+            k: v.copy() for k, v in DEFAULT_MEASURE_CONFIG.items()
+        }
 
         self.output_dir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
         self.file_type_var = tk.StringVar(value=FILE_TYPES[0])
@@ -417,6 +709,8 @@ class App(tk.Tk):
 
         self.custom_btn = ttk.Button(sec4, text="Custom Label 설정", command=self.configure_custom_labels, state="disabled")
         self.custom_btn.grid(row=0, column=1, padx=(8, 0))
+        self.measure_btn = ttk.Button(sec4, text="Measure 설정", command=self.configure_measure_settings, state="normal")
+        self.measure_btn.grid(row=0, column=2, padx=(8, 0))
 
         # 실행
         sec5 = ttk.Frame(root)
@@ -442,6 +736,7 @@ class App(tk.Tk):
     def _on_measure_type_change(self):
         is_custom = self.measure_type_var.get() == "Custom"
         self.custom_btn.configure(state="normal" if is_custom else "disabled")
+        self.measure_btn.configure(state="disabled" if is_custom else "normal")
         if not is_custom:
             self.custom_labels = None
 
@@ -502,6 +797,18 @@ class App(tk.Tk):
             self.custom_labels = dialog.result
             self._append_log(f"[INFO] Custom label 설정 완료: {list(self.custom_labels.keys())}")
 
+    def configure_measure_settings(self):
+        measure_type = self.measure_type_var.get()
+        if measure_type == "Custom":
+            messagebox.showinfo("안내", "Custom은 Measure 설정 대신 Custom Label 설정을 사용합니다.")
+            return
+        current = self.measure_configs.get(measure_type, {}).copy()
+        dialog = MeasureConfigDialog(self, measure_type, current)
+        self.wait_window(dialog)
+        if dialog.result is not None:
+            self.measure_configs[measure_type] = dialog.result
+            self._append_log(f"[INFO] {measure_type} 설정 업데이트 완료")
+
     def process(self):
         selected_files = self._selected_files()
         if not selected_files:
@@ -540,6 +847,7 @@ class App(tk.Tk):
                 min_interval=min_interval,
                 measure_type=self.measure_type_var.get(),
                 custom_labels=self.custom_labels,
+                measure_config=self.measure_configs.get(self.measure_type_var.get()),
                 on_progress=on_progress,
                 on_message=on_message,
             )
