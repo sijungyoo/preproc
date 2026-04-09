@@ -53,6 +53,17 @@ DEFAULT_MEASURE_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# Small Utils
+# ---------------------------------------------------------------------------
+
+def lower_first_char(text: str) -> str:
+    """Return text with only the first character lowercased."""
+    if not text:
+        return text
+    return text[:1].lower() + text[1:]
+
+
+# ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
 
@@ -422,7 +433,6 @@ def process_files(
 
     Returns a list of saved file paths.
     """
-    del thres_cur  # reserved for future parameter extraction
     os.makedirs(output_dir, exist_ok=True)
     saved_paths: list[str] = []
 
@@ -467,7 +477,7 @@ def process_files(
                     raise ValueError("Measure 설정값이 없습니다.")
                 meta = load_metadata_from_sheet3(filepath, file_type)
                 target_params = [p.strip() for p in measure_config.get("target_params", "").split(",") if p.strip()]
-                label_header = measure_config.get("label_header", "").strip()
+                label_header = lower_first_char(measure_config.get("label_header", "").strip())
                 polarity = measure_config.get("polarity", "PGM").strip()
                 labels = build_measure_labels(measure_type, meta, target_params)
                 polarity_values = build_polarities(polarity, len(labels))
@@ -757,7 +767,7 @@ class App(tk.Tk):
         self.selected_files = list(selected)
         self.file_listbox.delete(0, "end")
         for path in self.selected_files:
-            self.file_listbox.insert("end", path)
+            self.file_listbox.insert("end", os.path.basename(path))
 
         for i in range(len(self.selected_files)):
             self.file_listbox.selection_set(i)
@@ -767,7 +777,7 @@ class App(tk.Tk):
 
     def _selected_files(self) -> list[str]:
         indices = self.file_listbox.curselection()
-        return [self.file_listbox.get(i) for i in indices]
+        return [self.selected_files[i] for i in indices]
 
     def _detect_subset_count(self, selected_files: list[str], file_type: str, min_interval: float) -> int:
         df = load_file(selected_files[0], file_type)
