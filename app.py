@@ -443,10 +443,11 @@ def process_files(
                 continue
 
             # 3. Extract parameters per subset
-            param_dicts = [
-                extract_parameters(s, voltage_col, current_col, thres_cur)
-                for s in subsets
-            ]
+            param_dicts = []
+            for subset in subsets:
+                param_dicts.append(
+                    extract_parameters(subset, voltage_col, current_col, thres_cur)
+                )
 
             param_cols = []
             for i, params in enumerate(param_dicts):
