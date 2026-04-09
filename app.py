@@ -830,42 +830,8 @@ class App(tk.Tk):
         self.progress["value"] = 0
         self.status_var.set("처리 시작…")
 
-        def on_progress(progress: float, text: str):
-            self.after(0, lambda: self._update_progress(progress, text))
-
-        def on_message(level: str, msg: str):
-            self.after(0, lambda: self._handle_message(level, msg))
-
-        def worker(
-            file_paths: list[str],
-            file_type: str,
-            output_dir: str,
-            voltage_col: str,
-            current_col: str,
-            thres_cur_value: float,
-            min_interval_value: float,
-            measure_type: str,
-            custom_labels: dict[str, list[str]] | None,
-            measure_config: dict | None,
-        ):
-            saved = process_files(
-                file_paths=file_paths,
-                file_type=file_type,
-                output_dir=output_dir,
-                voltage_col=voltage_col,
-                current_col=current_col,
-                thres_cur=thres_cur_value,
-                min_interval=min_interval_value,
-                measure_type=measure_type,
-                custom_labels=custom_labels,
-                measure_config=measure_config,
-                on_progress=on_progress,
-                on_message=on_message,
-            )
-            self.after(0, lambda: self._finish_process(saved))
-
         threading.Thread(
-            target=worker,
+            target=self._worker_process,
             args=(
                 list(selected_files),
                 self.file_type_var.get(),
@@ -880,6 +846,41 @@ class App(tk.Tk):
             ),
             daemon=True,
         ).start()
+
+    def _worker_process(
+        self,
+        file_paths: list[str],
+        file_type: str,
+        output_dir: str,
+        voltage_col: str,
+        current_col: str,
+        thres_cur_value: float,
+        min_interval_value: float,
+        measure_type: str,
+        custom_labels: dict[str, list[str]] | None,
+        measure_config: dict | None,
+    ):
+        def on_progress(progress: float, text: str):
+            self.after(0, lambda p=progress, t=text: self._update_progress(p, t))
+
+        def on_message(level: str, msg: str):
+            self.after(0, lambda lv=level, m=msg: self._handle_message(lv, m))
+
+        saved = process_files(
+            file_paths=file_paths,
+            file_type=file_type,
+            output_dir=output_dir,
+            voltage_col=voltage_col,
+            current_col=current_col,
+            thres_cur=thres_cur_value,
+            min_interval=min_interval_value,
+            measure_type=measure_type,
+            custom_labels=custom_labels,
+            measure_config=measure_config,
+            on_progress=on_progress,
+            on_message=on_message,
+        )
+        self.after(0, lambda: self._finish_process(saved))
 
     def _update_progress(self, progress: float, text: str):
         self.progress["value"] = max(0, min(100, progress * 100))
