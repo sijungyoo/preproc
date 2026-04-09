@@ -5,7 +5,7 @@ import glob
 import os
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,17 @@ DEFAULT_MEASURE_CONFIG = {
         "polarity": "PGM",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Small Utils
+# ---------------------------------------------------------------------------
+
+def lower_first_char(text: str) -> str:
+    """Return text with only the first character lowercased."""
+    if not text:
+        return text
+    return text[:1].lower() + text[1:]
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +433,6 @@ def process_files(
 
     Returns a list of saved file paths.
     """
-    del thres_cur  # reserved for future parameter extraction
     os.makedirs(output_dir, exist_ok=True)
     saved_paths: list[str] = []
 
@@ -467,7 +477,7 @@ def process_files(
                     raise ValueError("Measure 설정값이 없습니다.")
                 meta = load_metadata_from_sheet3(filepath, file_type)
                 target_params = [p.strip() for p in measure_config.get("target_params", "").split(",") if p.strip()]
-                label_header = measure_config.get("label_header", "").strip()
+                label_header = lower_first_char(measure_config.get("label_header", "").strip())
                 polarity = measure_config.get("polarity", "PGM").strip()
                 labels = build_measure_labels(measure_type, meta, target_params)
                 polarity_values = build_polarities(polarity, len(labels))
@@ -524,7 +534,8 @@ class CustomLabelDialog(tk.Toplevel):
         self.subset_count = subset_count
         self.result: dict[str, list[str]] | None = None
         self.column_count_var = tk.StringVar(value="1")
-        self.entries: list[tuple[tk.Entry, list[tk.Entry]]] = []
+        self.header_vars: list[tk.StringVar] = []
+        self.tree: ttk.Treeview | None = None
 
         self._build()
         self.transient(master)
@@ -534,22 +545,24 @@ class CustomLabelDialog(tk.Toplevel):
         ttk.Label(self, text=f"감지된 subset 수: {self.subset_count}").grid(row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(10, 6))
         ttk.Label(self, text="라벨 컬럼 수").grid(row=1, column=0, sticky="w", padx=10)
         ttk.Entry(self, textvariable=self.column_count_var, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Button(self, text="생성", command=self._render_inputs).grid(row=1, column=2, padx=6)
+        ttk.Button(self, text="적용", command=self._render_table).grid(row=1, column=2, padx=6)
+        ttk.Label(self, text="(셀 더블클릭으로 값 편집)").grid(row=1, column=3, sticky="w")
 
         self.form_frame = ttk.Frame(self)
         self.form_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=10, pady=10)
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
         btns = ttk.Frame(self)
         btns.grid(row=3, column=0, columnspan=4, sticky="e", padx=10, pady=(0, 10))
         ttk.Button(btns, text="취소", command=self.destroy).pack(side="right", padx=(6, 0))
         ttk.Button(btns, text="확인", command=self._save).pack(side="right")
 
-        self._render_inputs()
+        self._render_table()
 
-    def _render_inputs(self):
+    def _render_table(self):
         for widget in self.form_frame.winfo_children():
             widget.destroy()
-        self.entries.clear()
 
         try:
             n_cols = max(1, int(self.column_count_var.get()))
@@ -557,30 +570,84 @@ class CustomLabelDialog(tk.Toplevel):
             n_cols = 1
             self.column_count_var.set("1")
 
+        header_frame = ttk.Frame(self.form_frame)
+        header_frame.pack(fill="x", pady=(0, 8))
+        self.header_vars = []
         for c in range(n_cols):
-            ttk.Label(self.form_frame, text=f"컬럼 {c + 1} 이름").grid(row=c * 2, column=0, sticky="w", pady=(4, 2))
-            name_entry = ttk.Entry(self.form_frame, width=20)
-            name_entry.insert(0, f"label_{c + 1}")
-            name_entry.grid(row=c * 2, column=1, sticky="w", pady=(4, 2))
+            var = tk.StringVar(value=f"label_{c + 1}")
+            self.header_vars.append(var)
+            cell = ttk.Frame(header_frame)
+            cell.pack(side="left", padx=(0, 8))
+            ttk.Label(cell, text=f"컬럼 {c + 1} 이름").pack(anchor="w")
+            ttk.Entry(cell, textvariable=var, width=16).pack(anchor="w", pady=(2, 0))
 
-            val_entries = []
-            val_row = c * 2 + 1
-            for j in range(self.subset_count):
-                ttk.Label(self.form_frame, text=f"S{j + 1}").grid(row=val_row, column=j * 2, sticky="e", padx=(0, 2), pady=(0, 6))
-                entry = ttk.Entry(self.form_frame, width=10)
-                entry.grid(row=val_row, column=j * 2 + 1, sticky="w", padx=(0, 8), pady=(0, 6))
-                val_entries.append(entry)
+        table_frame = ttk.Frame(self.form_frame)
+        table_frame.pack(fill="both", expand=True)
 
-            self.entries.append((name_entry, val_entries))
+        columns = tuple(["subset"] + [f"col_{i + 1}" for i in range(n_cols)])
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=min(self.subset_count, 16))
+        self.tree.heading("subset", text="Subset")
+        self.tree.column("subset", width=100, anchor="center", stretch=False)
+
+        for i in range(n_cols):
+            cid = f"col_{i + 1}"
+            self.tree.heading(cid, text=f"label_{i + 1}")
+            self.tree.column(cid, width=140, anchor="center", stretch=True)
+
+        for j in range(self.subset_count):
+            self.tree.insert("", "end", values=[f"S{j + 1}"] + [""] * n_cols)
+
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        self.tree.bind("<Double-1>", self._edit_cell)
+
+    def _edit_cell(self, event):
+        if not self.tree:
+            return
+        row_id = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)
+        if not row_id or not col_id:
+            return
+
+        # #1은 subset 컬럼(읽기 전용)
+        col_idx = int(col_id[1:]) - 1
+        if col_idx <= 0:
+            return
+
+        values = list(self.tree.item(row_id, "values"))
+        cur_val = values[col_idx] if col_idx < len(values) else ""
+        new_val = simpledialog.askstring("셀 편집", "값을 입력하세요.", initialvalue=cur_val, parent=self)
+        if new_val is None:
+            return
+        values[col_idx] = new_val
+        self.tree.item(row_id, values=values)
 
     def _save(self):
-        result = {}
-        for name_entry, val_entries in self.entries:
-            col_name = name_entry.get().strip()
+        if not self.tree:
+            messagebox.showerror("오류", "테이블이 초기화되지 않았습니다.", parent=self)
+            return
+
+        result: dict[str, list[str]] = {}
+        rows = [self.tree.item(iid, "values") for iid in self.tree.get_children("")]
+
+        for i, var in enumerate(self.header_vars):
+            col_name = var.get().strip()
             if not col_name:
                 messagebox.showerror("입력 오류", "컬럼 이름은 비워둘 수 없습니다.", parent=self)
                 return
-            result[col_name] = [v.get() for v in val_entries]
+            if col_name in result:
+                messagebox.showerror("입력 오류", f"중복 컬럼 이름: {col_name}", parent=self)
+                return
+            result[col_name] = [str(row[i + 1]) if len(row) > i + 1 else "" for row in rows]
+
         self.result = result
         self.destroy()
 
@@ -757,7 +824,7 @@ class App(tk.Tk):
         self.selected_files = list(selected)
         self.file_listbox.delete(0, "end")
         for path in self.selected_files:
-            self.file_listbox.insert("end", path)
+            self.file_listbox.insert("end", os.path.basename(path))
 
         for i in range(len(self.selected_files)):
             self.file_listbox.selection_set(i)
@@ -767,7 +834,7 @@ class App(tk.Tk):
 
     def _selected_files(self) -> list[str]:
         indices = self.file_listbox.curselection()
-        return [self.file_listbox.get(i) for i in indices]
+        return [self.selected_files[i] for i in indices]
 
     def _detect_subset_count(self, selected_files: list[str], file_type: str, min_interval: float) -> int:
         df = load_file(selected_files[0], file_type)
