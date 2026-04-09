@@ -261,19 +261,37 @@ def build_measure_labels(
         v_min = _to_float(meta, target_params[0])
         v_max = _to_float(meta, target_params[1])
         v_step = _to_float(meta, target_params[2])
-        if v_step <= 0:
-            raise ValueError("V_step은 양수여야 합니다.")
+        if v_step == 0:
+            raise ValueError("V_step은 0일 수 없습니다.")
+        if v_min == v_max:
+            return [v_min]
+
+        direction = v_max - v_min
+        if direction * v_step < 0:
+            raise ValueError("V_min→V_max 방향과 V_step 부호가 일치해야 합니다.")
+
         labels = []
         cur = v_min
         guard = 0
-        while cur <= v_max + (abs(v_step) * 1e-9):
-            labels.append(cur)
-            cur += v_step
-            guard += 1
-            if guard > 1_000_000:
-                raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
-        if labels and labels[-1] > v_max:
-            labels[-1] = v_max
+        eps = abs(v_step) * 1e-9
+        if v_step > 0:
+            while cur <= v_max + eps:
+                labels.append(cur)
+                cur += v_step
+                guard += 1
+                if guard > 1_000_000:
+                    raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
+            if labels and labels[-1] > v_max:
+                labels[-1] = v_max
+        else:
+            while cur >= v_max - eps:
+                labels.append(cur)
+                cur += v_step
+                guard += 1
+                if guard > 1_000_000:
+                    raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
+            if labels and labels[-1] < v_max:
+                labels[-1] = v_max
         return labels
 
     if measure_type == "Retention":
