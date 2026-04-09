@@ -836,24 +836,50 @@ class App(tk.Tk):
         def on_message(level: str, msg: str):
             self.after(0, lambda: self._handle_message(level, msg))
 
-        def worker():
+        def worker(
+            file_paths: list[str],
+            file_type: str,
+            output_dir: str,
+            voltage_col: str,
+            current_col: str,
+            thres_cur_value: float,
+            min_interval_value: float,
+            measure_type: str,
+            custom_labels: dict[str, list[str]] | None,
+            measure_config: dict | None,
+        ):
             saved = process_files(
-                file_paths=selected_files,
-                file_type=self.file_type_var.get(),
-                output_dir=self.output_dir_var.get().strip(),
-                voltage_col=self.voltage_col_var.get().strip(),
-                current_col=self.current_col_var.get().strip(),
-                thres_cur=thres_cur,
-                min_interval=min_interval,
-                measure_type=self.measure_type_var.get(),
-                custom_labels=self.custom_labels,
-                measure_config=self.measure_configs.get(self.measure_type_var.get()),
+                file_paths=file_paths,
+                file_type=file_type,
+                output_dir=output_dir,
+                voltage_col=voltage_col,
+                current_col=current_col,
+                thres_cur=thres_cur_value,
+                min_interval=min_interval_value,
+                measure_type=measure_type,
+                custom_labels=custom_labels,
+                measure_config=measure_config,
                 on_progress=on_progress,
                 on_message=on_message,
             )
             self.after(0, lambda: self._finish_process(saved))
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(
+            target=worker,
+            args=(
+                list(selected_files),
+                self.file_type_var.get(),
+                self.output_dir_var.get().strip(),
+                self.voltage_col_var.get().strip(),
+                self.current_col_var.get().strip(),
+                float(thres_cur),
+                float(min_interval),
+                self.measure_type_var.get(),
+                self.custom_labels.copy() if self.custom_labels else None,
+                self.measure_configs.get(self.measure_type_var.get(), {}).copy(),
+            ),
+            daemon=True,
+        ).start()
 
     def _update_progress(self, progress: float, text: str):
         self.progress["value"] = max(0, min(100, progress * 100))
