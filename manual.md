@@ -1,6 +1,6 @@
 # File Preprocessor 사용자 매뉴얼 (한글)
 
-이 문서는 `app.py` 기반 **File Preprocessor (Tk)** 데스크톱 앱의 최종 사용자를 위한 사용법 안내서입니다.
+이 문서는 `app.py` 기반 **File Preprocessor (PySide6/Qt)** 데스크톱 앱의 최종 사용자를 위한 사용법 안내서입니다.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ### 요구사항
 - Python 3.10+
-- `requirements.txt`에 있는 의존성 설치
+- `requirements.txt`에 있는 의존성 설치 (`PySide6` 포함)
 - `nasca` 사용 시: Windows + Excel + `xlwings` 환경 필요
 
 ### 실행
@@ -123,11 +123,12 @@ python app.py
 
 `Custom Label 설정` 버튼으로 사용자 라벨을 직접 입력합니다.
 
-#### Treeview 기반 입력 UI 사용법
+#### 스프레드시트(QTableWidget) 기반 입력 UI 사용법
 1. `라벨 컬럼 수` 입력 후 `적용`
 2. 상단에서 컬럼명 수정 (예: `state`, `batch`, `temp`)
-3. 표에서 subset별 셀을 **더블클릭**해서 값 입력
-4. `확인`으로 저장
+3. 표에서 subset별 셀을 직접 편집 (더블클릭/키보드 입력)
+4. 범위 선택 후 **Ctrl+C / Ctrl+V**로 행·열 단위 복사/붙여넣기
+5. `확인`으로 저장
 
 검증 규칙:
 - 컬럼명 공백 불가
@@ -215,6 +216,6 @@ python app.py
 권장 캡처 목록:
 - 메인 화면 전체
 - Measure 설정 팝업
-- Custom Label(Treeview) 팝업
+- Custom Label(스프레드시트) 팝업
 - 처리 완료 후 로그/결과 예시
 
