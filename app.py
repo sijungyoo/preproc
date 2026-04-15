@@ -3,12 +3,11 @@ from __future__ import annotations
 import datetime
 import glob
 import os
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from PySide6 import QtCore, QtGui, QtWidgets
 
 # ---------------------------------------------------------------------------
 # Constants / Defaults
@@ -16,8 +15,8 @@ import pandas as pd
 _today = datetime.date.today().strftime("%y%m%d")
 DEFAULT_OUTPUT_DIR = rf"D:\Multimedia\upload\output_{_today}"
 
-DEFAULT_VOLTAGE_COL = "VMeasCh2"   # UI label: 전압 컬럼명 (cur_col)
-DEFAULT_CURRENT_COL = "ID"         # UI label: 전류 컬럼명 (vol_col)
+DEFAULT_VOLTAGE_COL = "VMeasCh2"   # UI label: 전압 컬럼명
+DEFAULT_CURRENT_COL = "ID"         # UI label: 전류 컬럼명
 DEFAULT_THRES_CUR = 1e-7
 DEFAULT_MIN_INTERVAL = 1e-5
 
@@ -53,11 +52,20 @@ DEFAULT_MEASURE_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# Small Utils
+# ---------------------------------------------------------------------------
+
+def lower_first_char(text: str) -> str:
+    if not text:
+        return text
+    return text[:1].lower() + text[1:]
+
+
+# ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
 
 def load_xls(filepath: str) -> pd.DataFrame:
-    """Load a legacy .xls file from a filesystem path using xlrd."""
     import xlrd
 
     wb = xlrd.open_workbook(filepath)
@@ -68,7 +76,6 @@ def load_xls(filepath: str) -> pd.DataFrame:
 
 
 def load_nasca(filepath: str) -> pd.DataFrame:
-    """Load a DRM-protected file via xlwings (requires Windows + Excel installed)."""
     import xlwings as xw
 
     app = xw.App(visible=False)
@@ -87,12 +94,10 @@ def load_nasca(filepath: str) -> pd.DataFrame:
 
 
 def load_csv(filepath: str) -> pd.DataFrame:
-    """Load a CSV file from a filesystem path."""
     return pd.read_csv(filepath)
 
 
 def load_file(filepath: str, file_type: str) -> pd.DataFrame:
-    """Dispatch to the appropriate loader based on file_type."""
     if file_type == "xls":
         return load_xls(filepath)
     if file_type == "nasca":
@@ -111,7 +116,6 @@ def _find_metadata_header_row(rows: list[list]) -> int:
 
 
 def load_metadata_from_sheet3(filepath: str, file_type: str) -> dict[str, str]:
-    """Extract metadata table from Sheet3 where columns are Parameter Name and Value."""
     rows: list[list]
     if file_type == "xls":
         import xlrd
@@ -159,7 +163,6 @@ def load_metadata_from_sheet3(filepath: str, file_type: str) -> dict[str, str]:
 
 
 def scan_directory(src_dir: str, file_type: str) -> list[str]:
-    """Return sorted list of full file paths in src_dir matching file_type."""
     pattern = os.path.join(src_dir, _EXT_MAP.get(file_type, "*.*"))
     return sorted(glob.glob(pattern))
 
@@ -169,12 +172,6 @@ def scan_directory(src_dir: str, file_type: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def detect_subsets(df: pd.DataFrame, min_interval: float) -> list[pd.DataFrame]:
-    """
-    Split df into subsets wherever consecutive TimeOutput values differ by
-    >= min_interval.
-
-    Returns a list of DataFrames (one per subset), all with reset indices.
-    """
     if TIME_COL not in df.columns:
         raise KeyError(
             f"Column '{TIME_COL}' not found in data. "
@@ -204,7 +201,6 @@ def extract_parameters(
     current_col: str,
     thres_cur: float,
 ) -> dict:
-    """Extract vth, vth_2, ss from a subset."""
     if TIME_COL not in subset_df.columns:
         raise KeyError(f"Column '{TIME_COL}' not found.")
     if voltage_col not in subset_df.columns:
@@ -250,19 +246,37 @@ def build_measure_labels(
         v_min = _to_float(meta, target_params[0])
         v_max = _to_float(meta, target_params[1])
         v_step = _to_float(meta, target_params[2])
-        if v_step <= 0:
-            raise ValueError("V_step은 양수여야 합니다.")
+        if v_step == 0:
+            raise ValueError("V_step은 0일 수 없습니다.")
+        if v_min == v_max:
+            return [v_min]
+
+        direction = v_max - v_min
+        if direction * v_step < 0:
+            raise ValueError("V_min→V_max 방향과 V_step 부호가 일치해야 합니다.")
+
         labels = []
         cur = v_min
         guard = 0
-        while cur <= v_max + (abs(v_step) * 1e-9):
-            labels.append(cur)
-            cur += v_step
-            guard += 1
-            if guard > 1_000_000:
-                raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
-        if labels and labels[-1] > v_max:
-            labels[-1] = v_max
+        eps = abs(v_step) * 1e-9
+        if v_step > 0:
+            while cur <= v_max + eps:
+                labels.append(cur)
+                cur += v_step
+                guard += 1
+                if guard > 1_000_000:
+                    raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
+            if labels and labels[-1] > v_max:
+                labels[-1] = v_max
+        else:
+            while cur >= v_max - eps:
+                labels.append(cur)
+                cur += v_step
+                guard += 1
+                if guard > 1_000_000:
+                    raise ValueError("ISPP label 계산이 비정상적으로 길어 중단했습니다.")
+            if labels and labels[-1] < v_max:
+                labels[-1] = v_max
         return labels
 
     if measure_type == "Retention":
@@ -290,7 +304,6 @@ def build_measure_labels(
             labels.append(cur)
             cur *= 10
         labels.append(cycle if cur > cycle else cur)
-        # 중복 제거(예: cycle=1)
         dedup = []
         for v in labels:
             if not dedup or dedup[-1] != v:
@@ -321,16 +334,6 @@ def label_subsets(
     polarity_values: list[str] | None = None,
     condition_values: dict[str, str] | None = None,
 ) -> list[pd.DataFrame]:
-    """
-    Add labeling columns to each subset DataFrame.
-
-    For ISPP / Endurance / Retention:
-        TODO: implement measure-type-specific labeling logic.
-
-    For Custom:
-        custom_labels = {col_name: [value_for_subset_0, value_for_subset_1, …]}
-        Each column is added to the corresponding subset.
-    """
     if measure_type == "Custom" and custom_labels:
         labeled = []
         for i, subset in enumerate(subsets):
@@ -372,10 +375,6 @@ def keep_and_rename_columns(
     current_col: str,
     extra_cols: list[str],
 ) -> pd.DataFrame:
-    """
-    Keep only the voltage, current, and any extra columns (params + labels).
-    Rename voltage_col → 'voltage', current_col → 'current'.
-    """
     cols_to_keep = []
     for c in [voltage_col, current_col] + extra_cols:
         if c in subset_df.columns and c not in cols_to_keep:
@@ -391,16 +390,11 @@ def keep_and_rename_columns(
 
 
 def downsample(subset_df: pd.DataFrame, max_rows: int = MAX_ROWS) -> pd.DataFrame:
-    """Evenly downsample a subset to at most max_rows rows."""
     if len(subset_df) <= max_rows:
         return subset_df.reset_index(drop=True)
     indices = np.linspace(0, len(subset_df) - 1, max_rows, dtype=int)
     return subset_df.iloc[indices].reset_index(drop=True)
 
-
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
 
 def process_files(
     file_paths: list[str],
@@ -416,13 +410,6 @@ def process_files(
     on_progress=None,
     on_message=None,
 ) -> list[str]:
-    """
-    Full pipeline: load → detect subsets → extract params → label →
-    trim/rename columns → downsample → save CSV.
-
-    Returns a list of saved file paths.
-    """
-    del thres_cur  # reserved for future parameter extraction
     os.makedirs(output_dir, exist_ok=True)
     saved_paths: list[str] = []
 
@@ -432,21 +419,15 @@ def process_files(
         if on_progress:
             on_progress(idx / max(total, 1), f"Processing {fname}…")
         try:
-            # 1. Load
             df = load_file(filepath, file_type)
 
-            # 2. Detect subsets
             subsets = detect_subsets(df, min_interval)
             if not subsets:
                 if on_message:
                     on_message("warning", f"{fname}: subset이 감지되지 않았습니다 — 건너뜁니다.")
                 continue
 
-            # 3. Extract parameters per subset
-            param_dicts = [
-                extract_parameters(s, voltage_col, current_col, thres_cur)
-                for s in subsets
-            ]
+            param_dicts = [extract_parameters(s, voltage_col, current_col, thres_cur) for s in subsets]
 
             param_cols = []
             for i, params in enumerate(param_dicts):
@@ -455,7 +436,6 @@ def process_files(
                     if k not in param_cols:
                         param_cols.append(k)
 
-            # 4. Label subsets
             label_cols = []
             if measure_type == "Custom":
                 subsets = label_subsets(subsets, measure_type, custom_labels)
@@ -467,7 +447,7 @@ def process_files(
                     raise ValueError("Measure 설정값이 없습니다.")
                 meta = load_metadata_from_sheet3(filepath, file_type)
                 target_params = [p.strip() for p in measure_config.get("target_params", "").split(",") if p.strip()]
-                label_header = measure_config.get("label_header", "").strip()
+                label_header = lower_first_char(measure_config.get("label_header", "").strip())
                 polarity = measure_config.get("polarity", "PGM").strip()
                 labels = build_measure_labels(measure_type, meta, target_params)
                 polarity_values = build_polarities(polarity, len(labels))
@@ -488,7 +468,6 @@ def process_files(
                 )
                 label_cols = [label_header, "polarity"] + list(condition_values.keys())
 
-            # 5. Trim, rename, and downsample each subset
             extra_cols = param_cols + label_cols
             processed_subsets = []
             for subset in subsets:
@@ -496,7 +475,6 @@ def process_files(
                 subset = downsample(subset, MAX_ROWS)
                 processed_subsets.append(subset)
 
-            # 6. Concatenate and save
             result_df = pd.concat(processed_subsets, ignore_index=True)
             stem = os.path.splitext(fname)[0]
             out_path = os.path.join(output_dir, f"{stem}_processed.csv")
@@ -513,399 +491,512 @@ def process_files(
 
 
 # ---------------------------------------------------------------------------
-# Desktop UI
+# Qt UI
 # ---------------------------------------------------------------------------
 
-
-class CustomLabelDialog(tk.Toplevel):
-    def __init__(self, master, subset_count: int):
-        super().__init__(master)
-        self.title("Custom Labeling")
-        self.subset_count = subset_count
-        self.result: dict[str, list[str]] | None = None
-        self.column_count_var = tk.StringVar(value="1")
-        self.entries: list[tuple[tk.Entry, list[tk.Entry]]] = []
-
-        self._build()
-        self.transient(master)
-        self.grab_set()
-
-    def _build(self):
-        ttk.Label(self, text=f"감지된 subset 수: {self.subset_count}").grid(row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(10, 6))
-        ttk.Label(self, text="라벨 컬럼 수").grid(row=1, column=0, sticky="w", padx=10)
-        ttk.Entry(self, textvariable=self.column_count_var, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Button(self, text="생성", command=self._render_inputs).grid(row=1, column=2, padx=6)
-
-        self.form_frame = ttk.Frame(self)
-        self.form_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=10, pady=10)
-
-        btns = ttk.Frame(self)
-        btns.grid(row=3, column=0, columnspan=4, sticky="e", padx=10, pady=(0, 10))
-        ttk.Button(btns, text="취소", command=self.destroy).pack(side="right", padx=(6, 0))
-        ttk.Button(btns, text="확인", command=self._save).pack(side="right")
-
-        self._render_inputs()
-
-    def _render_inputs(self):
-        for widget in self.form_frame.winfo_children():
-            widget.destroy()
-        self.entries.clear()
-
-        try:
-            n_cols = max(1, int(self.column_count_var.get()))
-        except ValueError:
-            n_cols = 1
-            self.column_count_var.set("1")
-
-        for c in range(n_cols):
-            ttk.Label(self.form_frame, text=f"컬럼 {c + 1} 이름").grid(row=c * 2, column=0, sticky="w", pady=(4, 2))
-            name_entry = ttk.Entry(self.form_frame, width=20)
-            name_entry.insert(0, f"label_{c + 1}")
-            name_entry.grid(row=c * 2, column=1, sticky="w", pady=(4, 2))
-
-            val_entries = []
-            val_row = c * 2 + 1
-            for j in range(self.subset_count):
-                ttk.Label(self.form_frame, text=f"S{j + 1}").grid(row=val_row, column=j * 2, sticky="e", padx=(0, 2), pady=(0, 6))
-                entry = ttk.Entry(self.form_frame, width=10)
-                entry.grid(row=val_row, column=j * 2 + 1, sticky="w", padx=(0, 8), pady=(0, 6))
-                val_entries.append(entry)
-
-            self.entries.append((name_entry, val_entries))
-
-    def _save(self):
-        result = {}
-        for name_entry, val_entries in self.entries:
-            col_name = name_entry.get().strip()
-            if not col_name:
-                messagebox.showerror("입력 오류", "컬럼 이름은 비워둘 수 없습니다.", parent=self)
-                return
-            result[col_name] = [v.get() for v in val_entries]
-        self.result = result
-        self.destroy()
-
-
-class MeasureConfigDialog(tk.Toplevel):
-    def __init__(self, master, measure_type: str, current_config: dict):
-        super().__init__(master)
-        self.title(f"{measure_type} 설정")
-        self.measure_type = measure_type
+class MeasureConfigDialog(QtWidgets.QDialog):
+    def __init__(self, measure_type: str, current_config: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"{measure_type} 설정")
         self.result: dict | None = None
 
-        self.target_params_var = tk.StringVar(value=current_config.get("target_params", ""))
-        self.label_header_var = tk.StringVar(value=current_config.get("label_header", ""))
-        self.condition_params_var = tk.StringVar(value=current_config.get("condition_params", ""))
-        self.polarity_var = tk.StringVar(value=current_config.get("polarity", "PGM"))
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
 
-        self._build()
-        self.transient(master)
-        self.grab_set()
+        self.target_params_edit = QtWidgets.QLineEdit(current_config.get("target_params", ""))
+        self.label_header_edit = QtWidgets.QLineEdit(current_config.get("label_header", ""))
+        self.condition_params_edit = QtWidgets.QLineEdit(current_config.get("condition_params", ""))
+        self.polarity_box = QtWidgets.QComboBox()
+        self.polarity_box.addItems(POLARITIES)
+        self.polarity_box.setCurrentText(current_config.get("polarity", "PGM"))
 
-    def _build(self):
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
+        form.addRow("Target Parameter Name(s)", self.target_params_edit)
+        form.addRow("Subset Label Column Header", self.label_header_edit)
+        form.addRow("Append Condition Parameter Name(s)", self.condition_params_edit)
+        form.addRow("Polarity", self.polarity_box)
+        layout.addLayout(form)
 
-        ttk.Label(frm, text="Target Parameter Name(s) (콤마 구분)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.target_params_var, width=50).grid(row=1, column=0, sticky="we", pady=(2, 8))
-
-        ttk.Label(frm, text="Subset Label Column Header").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.label_header_var, width=50).grid(row=3, column=0, sticky="we", pady=(2, 8))
-
-        ttk.Label(frm, text="Append Condition Parameter Name(s) (콤마 구분)").grid(row=4, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.condition_params_var, width=50).grid(row=5, column=0, sticky="we", pady=(2, 8))
-
-        ttk.Label(frm, text="Polarity").grid(row=6, column=0, sticky="w")
-        ttk.Combobox(frm, textvariable=self.polarity_var, values=POLARITIES, state="readonly", width=20).grid(row=7, column=0, sticky="w", pady=(2, 8))
-
-        btns = ttk.Frame(frm)
-        btns.grid(row=8, column=0, sticky="e")
-        ttk.Button(btns, text="취소", command=self.destroy).pack(side="right", padx=(6, 0))
-        ttk.Button(btns, text="확인", command=self._save).pack(side="right")
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
 
     def _save(self):
-        label_header = self.label_header_var.get().strip()
-        target_params = self.target_params_var.get().strip()
+        label_header = self.label_header_edit.text().strip()
+        target_params = self.target_params_edit.text().strip()
         if not label_header or not target_params:
-            messagebox.showerror("입력 오류", "target params와 label header는 필수입니다.", parent=self)
+            QtWidgets.QMessageBox.critical(self, "입력 오류", "target params와 label header는 필수입니다.")
             return
         self.result = {
             "target_params": target_params,
             "label_header": label_header,
-            "condition_params": self.condition_params_var.get().strip(),
-            "polarity": self.polarity_var.get().strip(),
+            "condition_params": self.condition_params_edit.text().strip(),
+            "polarity": self.polarity_box.currentText().strip(),
         }
-        self.destroy()
+        self.accept()
 
 
-class App(tk.Tk):
+class CustomLabelDialog(QtWidgets.QDialog):
+    def __init__(self, subset_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Custom Labeling")
+        self.resize(900, 520)
+        self.subset_count = subset_count
+        self.result: dict[str, list[str]] | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel(f"감지된 subset 수: {subset_count}"))
+        top.addSpacing(16)
+        top.addWidget(QtWidgets.QLabel("라벨 컬럼 수"))
+        self.col_count_spin = QtWidgets.QSpinBox()
+        self.col_count_spin.setMinimum(1)
+        self.col_count_spin.setValue(1)
+        top.addWidget(self.col_count_spin)
+        apply_btn = QtWidgets.QPushButton("적용")
+        apply_btn.clicked.connect(self._rebuild_table)
+        top.addWidget(apply_btn)
+        top.addStretch(1)
+        hint = QtWidgets.QLabel("엑셀처럼 범위 선택 후 Ctrl+C / Ctrl+V 지원")
+        hint.setStyleSheet("color:#666;")
+        top.addWidget(hint)
+        layout.addLayout(top)
+
+        self.header_edits_container = QtWidgets.QWidget()
+        self.header_edits_layout = QtWidgets.QHBoxLayout(self.header_edits_container)
+        self.header_edits_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.header_edits_container)
+
+        self.table = QtWidgets.QTableWidget(self.subset_count, 1)
+        self.table.setHorizontalHeaderLabels(["label_1"])
+        self.table.setVerticalHeaderLabels([f"S{i + 1}" for i in range(self.subset_count)])
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ContiguousSelection)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
+            | QtWidgets.QAbstractItemView.AnyKeyPressed
+        )
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        layout.addWidget(self.table)
+
+        self._ensure_table_items()
+        self._rebuild_header_editors(1)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _ensure_table_items(self):
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                if self.table.item(r, c) is None:
+                    self.table.setItem(r, c, QtWidgets.QTableWidgetItem(""))
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        if event.matches(QtGui.QKeySequence.Copy):
+            self._copy_selection()
+            return
+        if event.matches(QtGui.QKeySequence.Paste):
+            self._paste_selection()
+            return
+        super().keyPressEvent(event)
+
+    def _copy_selection(self):
+        ranges = self.table.selectedRanges()
+        if not ranges:
+            return
+        rg = ranges[0]
+        lines = []
+        for r in range(rg.topRow(), rg.bottomRow() + 1):
+            cols = []
+            for c in range(rg.leftColumn(), rg.rightColumn() + 1):
+                item = self.table.item(r, c)
+                cols.append(item.text() if item else "")
+            lines.append("\t".join(cols))
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def _paste_selection(self):
+        text = QtWidgets.QApplication.clipboard().text()
+        if not text:
+            return
+        start = self.table.currentIndex()
+        start_row = start.row() if start.isValid() else 0
+        start_col = start.column() if start.isValid() else 0
+
+        rows = [line.split("\t") for line in text.splitlines()]
+        for dr, row in enumerate(rows):
+            rr = start_row + dr
+            if rr >= self.table.rowCount():
+                break
+            for dc, value in enumerate(row):
+                cc = start_col + dc
+                if cc >= self.table.columnCount():
+                    break
+                item = self.table.item(rr, cc)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem("")
+                    self.table.setItem(rr, cc, item)
+                item.setText(value)
+
+    def _rebuild_header_editors(self, n_cols: int):
+        while self.header_edits_layout.count():
+            w = self.header_edits_layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        self.header_edits: list[QtWidgets.QLineEdit] = []
+        for i in range(n_cols):
+            box = QtWidgets.QVBoxLayout()
+            container = QtWidgets.QWidget()
+            container.setLayout(box)
+            label = QtWidgets.QLabel(f"컬럼 {i + 1} 이름")
+            edit = QtWidgets.QLineEdit(f"label_{i + 1}")
+            edit.textChanged.connect(self._sync_table_headers)
+            self.header_edits.append(edit)
+            box.addWidget(label)
+            box.addWidget(edit)
+            self.header_edits_layout.addWidget(container)
+        self.header_edits_layout.addStretch(1)
+        self._sync_table_headers()
+
+    def _sync_table_headers(self):
+        headers = [e.text().strip() or f"label_{i + 1}" for i, e in enumerate(self.header_edits)]
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def _rebuild_table(self):
+        n_cols = self.col_count_spin.value()
+        old_rows = self.table.rowCount()
+        old_cols = self.table.columnCount()
+
+        snapshot = [["" for _ in range(old_cols)] for _ in range(old_rows)]
+        for r in range(old_rows):
+            for c in range(old_cols):
+                item = self.table.item(r, c)
+                snapshot[r][c] = item.text() if item else ""
+
+        self.table.setColumnCount(n_cols)
+        self._ensure_table_items()
+
+        for r in range(min(old_rows, self.table.rowCount())):
+            for c in range(min(old_cols, n_cols)):
+                self.table.item(r, c).setText(snapshot[r][c])
+
+        self._rebuild_header_editors(n_cols)
+
+    def _save(self):
+        headers = [e.text().strip() for e in self.header_edits]
+        if any(not h for h in headers):
+            QtWidgets.QMessageBox.critical(self, "입력 오류", "컬럼 이름은 비워둘 수 없습니다.")
+            return
+        if len(set(headers)) != len(headers):
+            QtWidgets.QMessageBox.critical(self, "입력 오류", "중복 컬럼 이름이 있습니다.")
+            return
+
+        result: dict[str, list[str]] = {h: [] for h in headers}
+        for c, name in enumerate(headers):
+            for r in range(self.table.rowCount()):
+                item = self.table.item(r, c)
+                result[name].append(item.text() if item else "")
+
+        self.result = result
+        self.accept()
+
+
+@dataclass
+class ProcessParams:
+    file_paths: list[str]
+    file_type: str
+    output_dir: str
+    voltage_col: str
+    current_col: str
+    thres_cur: float
+    min_interval: float
+    measure_type: str
+    custom_labels: dict[str, list[str]] | None
+    measure_config: dict | None
+
+
+class ProcessWorker(QtCore.QObject):
+    progress = QtCore.Signal(float, str)
+    message = QtCore.Signal(str, str)
+    finished = QtCore.Signal(list)
+
+    def __init__(self, params: ProcessParams):
+        super().__init__()
+        self.params = params
+
+    @QtCore.Slot()
+    def run(self):
+        saved = process_files(
+            file_paths=self.params.file_paths,
+            file_type=self.params.file_type,
+            output_dir=self.params.output_dir,
+            voltage_col=self.params.voltage_col,
+            current_col=self.params.current_col,
+            thres_cur=self.params.thres_cur,
+            min_interval=self.params.min_interval,
+            measure_type=self.params.measure_type,
+            custom_labels=self.params.custom_labels,
+            measure_config=self.params.measure_config,
+            on_progress=lambda p, t: self.progress.emit(p, t),
+            on_message=lambda lv, m: self.message.emit(lv, m),
+        )
+        self.finished.emit(saved)
+
+
+class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("File Preprocessor (Tk)")
-        self.geometry("980x700")
+        self.setWindowTitle("File Preprocessor (PySide6)")
+        self.resize(1040, 780)
 
         self.selected_files: list[str] = []
         self.custom_labels: dict[str, list[str]] | None = None
-        self.measure_configs = {
-            k: v.copy() for k, v in DEFAULT_MEASURE_CONFIG.items()
-        }
-
-        self.output_dir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
-        self.file_type_var = tk.StringVar(value=FILE_TYPES[0])
-        self.measure_type_var = tk.StringVar(value=MEASURE_TYPES[0])
-        self.voltage_col_var = tk.StringVar(value=DEFAULT_VOLTAGE_COL)
-        self.current_col_var = tk.StringVar(value=DEFAULT_CURRENT_COL)
-        self.thres_cur_var = tk.StringVar(value=f"{DEFAULT_THRES_CUR:.2e}")
-        self.min_interval_var = tk.StringVar(value=f"{DEFAULT_MIN_INTERVAL:.2e}")
-        self.status_var = tk.StringVar(value="대기 중")
+        self.measure_configs = {k: v.copy() for k, v in DEFAULT_MEASURE_CONFIG.items()}
 
         self._build_ui()
 
     def _build_ui(self):
-        root = ttk.Frame(self, padding=12)
-        root.pack(fill="both", expand=True)
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
 
-        # 1. 파일 선택
-        sec1 = ttk.LabelFrame(root, text="1. 파일 선택", padding=10)
-        sec1.pack(fill="x")
+        sec1 = QtWidgets.QGroupBox("1. 파일 선택")
+        sec1_l = QtWidgets.QVBoxLayout(sec1)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("File type"))
+        self.file_type_box = QtWidgets.QComboBox()
+        self.file_type_box.addItems(FILE_TYPES)
+        row.addWidget(self.file_type_box)
+        pick_btn = QtWidgets.QPushButton("파일 선택(다중)")
+        pick_btn.clicked.connect(self.select_files)
+        row.addWidget(pick_btn)
+        row.addStretch(1)
+        sec1_l.addLayout(row)
 
-        ttk.Label(sec1, text="File type").grid(row=0, column=0, sticky="w")
-        file_type_box = ttk.Combobox(sec1, textvariable=self.file_type_var, values=FILE_TYPES, state="readonly", width=10)
-        file_type_box.grid(row=0, column=1, sticky="w")
+        self.file_list = QtWidgets.QListWidget()
+        self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        sec1_l.addWidget(self.file_list)
+        root.addWidget(sec1)
 
-        ttk.Button(sec1, text="파일 선택(다중)", command=self.select_files).grid(row=0, column=2, padx=(8, 0))
+        sec2 = QtWidgets.QGroupBox("2. 출력 폴더")
+        sec2_l = QtWidgets.QHBoxLayout(sec2)
+        self.output_dir_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_DIR)
+        sec2_l.addWidget(self.output_dir_edit)
+        browse_btn = QtWidgets.QPushButton("찾기")
+        browse_btn.clicked.connect(self.browse_output)
+        sec2_l.addWidget(browse_btn)
+        root.addWidget(sec2)
 
-        self.file_listbox = tk.Listbox(sec1, selectmode="extended", height=8)
-        self.file_listbox.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        sec3 = QtWidgets.QGroupBox("3. 처리 파라미터")
+        form = QtWidgets.QGridLayout(sec3)
+        self.voltage_col_edit = QtWidgets.QLineEdit(DEFAULT_VOLTAGE_COL)
+        self.current_col_edit = QtWidgets.QLineEdit(DEFAULT_CURRENT_COL)
+        self.thres_cur_edit = QtWidgets.QLineEdit(f"{DEFAULT_THRES_CUR:.2e}")
+        self.min_interval_edit = QtWidgets.QLineEdit(f"{DEFAULT_MIN_INTERVAL:.2e}")
 
-        # 2. 출력 폴더
-        sec2 = ttk.LabelFrame(root, text="2. 출력 폴더", padding=10)
-        sec2.pack(fill="x", pady=(10, 0))
-        ttk.Entry(sec2, textvariable=self.output_dir_var, width=80).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(sec2, text="찾기", command=self._browse_output).grid(row=0, column=1)
+        form.addWidget(QtWidgets.QLabel("전압 컬럼명"), 0, 0)
+        form.addWidget(self.voltage_col_edit, 0, 1)
+        form.addWidget(QtWidgets.QLabel("전류 컬럼명"), 0, 2)
+        form.addWidget(self.current_col_edit, 0, 3)
+        form.addWidget(QtWidgets.QLabel("Vth 임계전류값"), 1, 0)
+        form.addWidget(self.thres_cur_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("Curve 분리 최소 간격"), 1, 2)
+        form.addWidget(self.min_interval_edit, 1, 3)
+        root.addWidget(sec3)
 
-        # 3. 처리 파라미터
-        sec3 = ttk.LabelFrame(root, text="3. 처리 파라미터", padding=10)
-        sec3.pack(fill="x", pady=(10, 0))
+        sec4 = QtWidgets.QGroupBox("4. Measure Type")
+        sec4_l = QtWidgets.QHBoxLayout(sec4)
+        self.measure_type_box = QtWidgets.QComboBox()
+        self.measure_type_box.addItems(MEASURE_TYPES)
+        self.measure_type_box.currentTextChanged.connect(self.on_measure_type_changed)
+        sec4_l.addWidget(self.measure_type_box)
+        self.custom_btn = QtWidgets.QPushButton("Custom Label 설정")
+        self.custom_btn.clicked.connect(self.configure_custom_labels)
+        self.custom_btn.setEnabled(False)
+        sec4_l.addWidget(self.custom_btn)
+        self.measure_btn = QtWidgets.QPushButton("Measure 설정")
+        self.measure_btn.clicked.connect(self.configure_measure_settings)
+        sec4_l.addWidget(self.measure_btn)
+        sec4_l.addStretch(1)
+        root.addWidget(sec4)
 
-        ttk.Label(sec3, text="전압 컬럼명").grid(row=0, column=0, sticky="w")
-        ttk.Entry(sec3, textvariable=self.voltage_col_var, width=24).grid(row=0, column=1, sticky="w", padx=(6, 14))
+        run_row = QtWidgets.QHBoxLayout()
+        self.process_btn = QtWidgets.QPushButton("Process")
+        self.process_btn.clicked.connect(self.process)
+        run_row.addWidget(self.process_btn)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 100)
+        run_row.addWidget(self.progress)
+        root.addLayout(run_row)
 
-        ttk.Label(sec3, text="전류 컬럼명").grid(row=0, column=2, sticky="w")
-        ttk.Entry(sec3, textvariable=self.current_col_var, width=24).grid(row=0, column=3, sticky="w", padx=(6, 0))
+        self.status_label = QtWidgets.QLabel("대기 중")
+        root.addWidget(self.status_label)
 
-        ttk.Label(sec3, text="Vth 임계전류값").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(sec3, textvariable=self.thres_cur_var, width=24).grid(row=1, column=1, sticky="w", padx=(6, 14), pady=(8, 0))
+        log_group = QtWidgets.QGroupBox("로그")
+        log_l = QtWidgets.QVBoxLayout(log_group)
+        self.log_text = QtWidgets.QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        log_l.addWidget(self.log_text)
+        root.addWidget(log_group, 1)
 
-        ttk.Label(sec3, text="Curve 분리 최소 간격").grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ttk.Entry(sec3, textvariable=self.min_interval_var, width=24).grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(8, 0))
+    def append_log(self, msg: str):
+        self.log_text.appendPlainText(msg)
 
-        # 4. Measure Type
-        sec4 = ttk.LabelFrame(root, text="4. Measure Type", padding=10)
-        sec4.pack(fill="x", pady=(10, 0))
-
-        measure_box = ttk.Combobox(sec4, textvariable=self.measure_type_var, values=MEASURE_TYPES, state="readonly", width=16)
-        measure_box.grid(row=0, column=0, sticky="w")
-        measure_box.bind("<<ComboboxSelected>>", lambda _: self._on_measure_type_change())
-
-        self.custom_btn = ttk.Button(sec4, text="Custom Label 설정", command=self.configure_custom_labels, state="disabled")
-        self.custom_btn.grid(row=0, column=1, padx=(8, 0))
-        self.measure_btn = ttk.Button(sec4, text="Measure 설정", command=self.configure_measure_settings, state="normal")
-        self.measure_btn.grid(row=0, column=2, padx=(8, 0))
-
-        # 실행
-        sec5 = ttk.Frame(root)
-        sec5.pack(fill="x", pady=(12, 0))
-        self.process_btn = ttk.Button(sec5, text="Process", command=self.process)
-        self.process_btn.pack(side="left")
-
-        self.progress = ttk.Progressbar(sec5, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True, padx=(10, 0))
-
-        ttk.Label(root, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
-
-        log_frame = ttk.LabelFrame(root, text="로그", padding=8)
-        log_frame.pack(fill="both", expand=True, pady=(10, 0))
-        self.log_text = tk.Text(log_frame, height=10)
-        self.log_text.pack(fill="both", expand=True)
-
-    def _browse_output(self):
-        path = filedialog.askdirectory(initialdir=self.output_dir_var.get() or "/")
+    def browse_output(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "출력 폴더 선택", self.output_dir_edit.text() or "/")
         if path:
-            self.output_dir_var.set(path)
-
-    def _on_measure_type_change(self):
-        is_custom = self.measure_type_var.get() == "Custom"
-        self.custom_btn.configure(state="normal" if is_custom else "disabled")
-        self.measure_btn.configure(state="disabled" if is_custom else "normal")
-        if not is_custom:
-            self.custom_labels = None
-
-    def _append_log(self, msg: str):
-        self.log_text.insert("end", msg + "\n")
-        self.log_text.see("end")
+            self.output_dir_edit.setText(path)
 
     def select_files(self):
-        file_type = self.file_type_var.get().strip()
+        file_type = self.file_type_box.currentText().strip()
         pattern = _EXT_MAP.get(file_type, "*.*")
-        selected = filedialog.askopenfilenames(
-            title="처리할 파일 선택 (다중 선택 가능)",
-            filetypes=[(f"{file_type} files", pattern), ("All files", "*.*")],
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "처리할 파일 선택 (다중 선택 가능)",
+            "",
+            f"{file_type} files ({pattern});;All files (*.*)",
         )
-        if not selected:
+        if not files:
             return
 
-        self.selected_files = list(selected)
-        self.file_listbox.delete(0, "end")
+        self.selected_files = list(files)
+        self.file_list.clear()
         for path in self.selected_files:
-            self.file_listbox.insert("end", path)
+            item = QtWidgets.QListWidgetItem(os.path.basename(path))
+            item.setData(QtCore.Qt.UserRole, path)
+            self.file_list.addItem(item)
+            item.setSelected(True)
 
-        for i in range(len(self.selected_files)):
-            self.file_listbox.selection_set(i)
+        self.status_label.setText(f"{len(self.selected_files)}개 파일 선택됨")
+        self.append_log(f"[INFO] 파일 선택 완료: {len(self.selected_files)}개")
 
-        self.status_var.set(f"{len(self.selected_files)}개 파일 선택됨")
-        self._append_log(f"[INFO] 파일 선택 완료: {len(self.selected_files)}개")
+    def selected_files_paths(self) -> list[str]:
+        return [item.data(QtCore.Qt.UserRole) for item in self.file_list.selectedItems()]
 
-    def _selected_files(self) -> list[str]:
-        indices = self.file_listbox.curselection()
-        return [self.file_listbox.get(i) for i in indices]
-
-    def _detect_subset_count(self, selected_files: list[str], file_type: str, min_interval: float) -> int:
+    def detect_subset_count(self, selected_files: list[str], file_type: str, min_interval: float) -> int:
         df = load_file(selected_files[0], file_type)
         subsets = detect_subsets(df, min_interval)
         return len(subsets)
 
+    def on_measure_type_changed(self, value: str):
+        is_custom = value == "Custom"
+        self.custom_btn.setEnabled(is_custom)
+        self.measure_btn.setEnabled(not is_custom)
+        if not is_custom:
+            self.custom_labels = None
+
     def configure_custom_labels(self):
-        selected = self._selected_files()
+        selected = self.selected_files_paths()
         if not selected:
-            messagebox.showwarning("안내", "먼저 파일을 1개 이상 선택하세요.")
+            QtWidgets.QMessageBox.warning(self, "안내", "먼저 파일을 1개 이상 선택하세요.")
             return
 
         try:
-            min_interval = float(self.min_interval_var.get())
-            subset_count = self._detect_subset_count(selected, self.file_type_var.get(), min_interval)
+            min_interval = float(self.min_interval_edit.text())
+            subset_count = self.detect_subset_count(selected, self.file_type_box.currentText(), min_interval)
         except Exception as e:
-            messagebox.showerror("오류", f"subset check 실패: {e}")
+            QtWidgets.QMessageBox.critical(self, "오류", f"subset check 실패: {e}")
             return
 
         if subset_count <= 0:
-            messagebox.showwarning("안내", "subset이 감지되지 않았습니다.")
+            QtWidgets.QMessageBox.warning(self, "안내", "subset이 감지되지 않았습니다.")
             return
 
-        dialog = CustomLabelDialog(self, subset_count=subset_count)
-        self.wait_window(dialog)
-        if dialog.result is not None:
+        dialog = CustomLabelDialog(subset_count, self)
+        if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.result is not None:
             self.custom_labels = dialog.result
-            self._append_log(f"[INFO] Custom label 설정 완료: {list(self.custom_labels.keys())}")
+            self.append_log(f"[INFO] Custom label 설정 완료: {list(self.custom_labels.keys())}")
 
     def configure_measure_settings(self):
-        measure_type = self.measure_type_var.get()
+        measure_type = self.measure_type_box.currentText()
         if measure_type == "Custom":
-            messagebox.showinfo("안내", "Custom은 Measure 설정 대신 Custom Label 설정을 사용합니다.")
+            QtWidgets.QMessageBox.information(self, "안내", "Custom은 Measure 설정 대신 Custom Label 설정을 사용합니다.")
             return
-        current = self.measure_configs.get(measure_type, {}).copy()
-        dialog = MeasureConfigDialog(self, measure_type, current)
-        self.wait_window(dialog)
-        if dialog.result is not None:
+        dialog = MeasureConfigDialog(measure_type, self.measure_configs.get(measure_type, {}).copy(), self)
+        if dialog.exec() == QtWidgets.QDialog.Accepted and dialog.result is not None:
             self.measure_configs[measure_type] = dialog.result
-            self._append_log(f"[INFO] {measure_type} 설정 업데이트 완료")
+            self.append_log(f"[INFO] {measure_type} 설정 업데이트 완료")
 
     def process(self):
-        selected_files = self._selected_files()
-        if not selected_files:
-            messagebox.showerror("오류", "처리할 파일을 선택해 주세요.")
+        selected = self.selected_files_paths()
+        if not selected:
+            QtWidgets.QMessageBox.critical(self, "오류", "처리할 파일을 선택해 주세요.")
             return
 
-        if self.measure_type_var.get() == "Custom" and not self.custom_labels:
-            messagebox.showwarning("안내", "Custom Label 설정을 먼저 진행하세요.")
+        measure_type = self.measure_type_box.currentText()
+        if measure_type == "Custom" and not self.custom_labels:
+            QtWidgets.QMessageBox.warning(self, "안내", "Custom Label 설정을 먼저 진행하세요.")
             return
 
         try:
-            thres_cur = float(self.thres_cur_var.get())
-            min_interval = float(self.min_interval_var.get())
+            thres_cur = float(self.thres_cur_edit.text())
+            min_interval = float(self.min_interval_edit.text())
         except ValueError:
-            messagebox.showerror("오류", "숫자 입력값(thres_cur, min_interval)을 확인해 주세요.")
+            QtWidgets.QMessageBox.critical(self, "오류", "숫자 입력값(thres_cur, min_interval)을 확인해 주세요.")
             return
 
-        self.process_btn.configure(state="disabled")
-        self.progress["value"] = 0
-        self.status_var.set("처리 시작…")
-
-        threading.Thread(
-            target=self._worker_process,
-            args=(
-                list(selected_files),
-                self.file_type_var.get(),
-                self.output_dir_var.get().strip(),
-                self.voltage_col_var.get().strip(),
-                self.current_col_var.get().strip(),
-                float(thres_cur),
-                float(min_interval),
-                self.measure_type_var.get(),
-                self.custom_labels.copy() if self.custom_labels else None,
-                self.measure_configs.get(self.measure_type_var.get(), {}).copy(),
-            ),
-            daemon=True,
-        ).start()
-
-    def _worker_process(
-        self,
-        file_paths: list[str],
-        file_type: str,
-        output_dir: str,
-        voltage_col: str,
-        current_col: str,
-        thres_cur_value: float,
-        min_interval_value: float,
-        measure_type: str,
-        custom_labels: dict[str, list[str]] | None,
-        measure_config: dict | None,
-    ):
-        def on_progress(progress: float, text: str):
-            self.after(0, lambda p=progress, t=text: self._update_progress(p, t))
-
-        def on_message(level: str, msg: str):
-            self.after(0, lambda lv=level, m=msg: self._handle_message(lv, m))
-
-        saved = process_files(
-            file_paths=file_paths,
-            file_type=file_type,
-            output_dir=output_dir,
-            voltage_col=voltage_col,
-            current_col=current_col,
-            thres_cur=thres_cur_value,
-            min_interval=min_interval_value,
+        params = ProcessParams(
+            file_paths=selected,
+            file_type=self.file_type_box.currentText(),
+            output_dir=self.output_dir_edit.text().strip(),
+            voltage_col=self.voltage_col_edit.text().strip(),
+            current_col=self.current_col_edit.text().strip(),
+            thres_cur=thres_cur,
+            min_interval=min_interval,
             measure_type=measure_type,
-            custom_labels=custom_labels,
-            measure_config=measure_config,
-            on_progress=on_progress,
-            on_message=on_message,
+            custom_labels=self.custom_labels.copy() if self.custom_labels else None,
+            measure_config=self.measure_configs.get(measure_type, {}).copy(),
         )
-        self.after(0, lambda: self._finish_process(saved))
 
-    def _update_progress(self, progress: float, text: str):
-        self.progress["value"] = max(0, min(100, progress * 100))
-        self.status_var.set(text)
+        self.process_btn.setEnabled(False)
+        self.progress.setValue(0)
+        self.status_label.setText("처리 시작…")
 
-    def _handle_message(self, level: str, msg: str):
-        prefix = level.upper()
-        self._append_log(f"[{prefix}] {msg}")
+        self.thread = QtCore.QThread(self)
+        self.worker = ProcessWorker(params)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.message.connect(self.handle_message)
+        self.worker.finished.connect(self.finish_process)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
 
-    def _finish_process(self, saved: list[str]):
-        self.process_btn.configure(state="normal")
+    @QtCore.Slot(float, str)
+    def update_progress(self, progress: float, text: str):
+        self.progress.setValue(max(0, min(100, int(progress * 100))))
+        self.status_label.setText(text)
+
+    @QtCore.Slot(str, str)
+    def handle_message(self, level: str, msg: str):
+        self.append_log(f"[{level.upper()}] {msg}")
+
+    @QtCore.Slot(list)
+    def finish_process(self, saved: list[str]):
+        self.process_btn.setEnabled(True)
         if saved:
-            self.status_var.set(f"완료: {len(saved)}개 파일 저장")
-            self._append_log("[INFO] 저장 완료 파일:")
-            for path in saved:
-                self._append_log(f"  - {path}")
-            messagebox.showinfo("완료", f"{len(saved)}개 파일 저장 완료")
+            self.status_label.setText(f"완료: {len(saved)}개 파일 저장")
+            self.append_log("[INFO] 저장 완료 파일:")
+            for p in saved:
+                self.append_log(f"  - {p}")
+            QtWidgets.QMessageBox.information(self, "완료", f"{len(saved)}개 파일 저장 완료")
         else:
-            self.status_var.set("완료: 저장된 파일 없음")
-            messagebox.showwarning("완료", "저장된 파일이 없습니다. 로그를 확인하세요.")
+            self.status_label.setText("완료: 저장된 파일 없음")
+            QtWidgets.QMessageBox.warning(self, "완료", "저장된 파일이 없습니다. 로그를 확인하세요.")
 
 
 def main():
-    app = App()
-    app.mainloop()
+    app = QtWidgets.QApplication([])
+    win = MainWindow()
+    win.show()
+    app.exec()
 
 
 if __name__ == "__main__":
