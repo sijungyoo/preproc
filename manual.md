@@ -53,7 +53,11 @@ python app.py
   - `xls`
   - `nasca` (`xls` 기반이지만 DRM 파일 로딩 방식 다름)
   - `csv`
+- `입력 폴더`를 먼저 지정할 수 있습니다.
+  - `찾기`: 폴더 직접 선택
+  - `폴더 스캔`: 선택한 `File type` 확장자 기준으로 폴더 내 파일 자동 로드
 - `파일 선택(다중)` 버튼으로 여러 파일 선택 가능
+  - 이때 파일 선택 창의 시작 경로는 `입력 폴더`를 사용합니다.
 - 목록에는 **파일명만** 표시됩니다 (경로는 내부적으로 유지)
 - 목록에서 체크된(선택된) 파일만 실제 처리 대상입니다.
 
@@ -198,13 +202,14 @@ python app.py
 
 1. `python app.py` 실행
 2. `File type` 선택 + 파일 다중 선택
-3. 출력 폴더 지정
-4. 컬럼명/임계값 확인
-5. Measure Type 선택
+3. 필요 시 `입력 폴더` 지정 후 `폴더 스캔`으로 자동 선택
+4. 출력 폴더 지정
+5. 컬럼명/임계값 확인
+6. Measure Type 선택
    - ISPP/Retention/Endurance: `Measure 설정`
    - Custom: `Custom Label 설정`
-6. `Process` 클릭
-7. 로그 확인 + `*_processed.csv` 결과 점검
+7. `Process` 클릭
+8. 로그 확인 + `*_processed.csv` 결과 점검
 
 ---
 
@@ -218,4 +223,3 @@ python app.py
 - Measure 설정 팝업
 - Custom Label(스프레드시트) 팝업
 - 처리 완료 후 로그/결과 예시
-

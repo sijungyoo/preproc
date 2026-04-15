@@ -772,6 +772,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_type_box = QtWidgets.QComboBox()
         self.file_type_box.addItems(FILE_TYPES)
         row.addWidget(self.file_type_box)
+        row.addSpacing(12)
+        row.addWidget(QtWidgets.QLabel("입력 폴더"))
+        self.input_dir_edit = QtWidgets.QLineEdit(os.getcwd())
+        row.addWidget(self.input_dir_edit, 1)
+        input_browse_btn = QtWidgets.QPushButton("찾기")
+        input_browse_btn.clicked.connect(self.browse_input)
+        row.addWidget(input_browse_btn)
+        scan_btn = QtWidgets.QPushButton("폴더 스캔")
+        scan_btn.clicked.connect(self.scan_input_directory)
+        row.addWidget(scan_btn)
         pick_btn = QtWidgets.QPushButton("파일 선택(다중)")
         pick_btn.clicked.connect(self.select_files)
         row.addWidget(pick_btn)
@@ -852,19 +862,48 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.output_dir_edit.setText(path)
 
+    def browse_input(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "입력 폴더 선택", self.input_dir_edit.text() or "/")
+        if path:
+            self.input_dir_edit.setText(path)
+
+    def scan_input_directory(self):
+        src_dir = self.input_dir_edit.text().strip()
+        if not src_dir or not os.path.isdir(src_dir):
+            QtWidgets.QMessageBox.warning(self, "안내", "유효한 입력 폴더를 지정해 주세요.")
+            return
+
+        file_type = self.file_type_box.currentText().strip()
+        files = scan_directory(src_dir, file_type)
+        if not files:
+            QtWidgets.QMessageBox.information(self, "안내", f"{file_type} 파일을 찾지 못했습니다.")
+            return
+
+        self.selected_files = files
+        self.file_list.clear()
+        for path in self.selected_files:
+            item = QtWidgets.QListWidgetItem(os.path.basename(path))
+            item.setData(QtCore.Qt.UserRole, path)
+            self.file_list.addItem(item)
+            item.setSelected(True)
+
+        self.status_label.setText(f"{len(self.selected_files)}개 파일 선택됨")
+        self.append_log(f"[INFO] 폴더 스캔 완료: {src_dir} ({len(self.selected_files)}개)")
+
     def select_files(self):
         file_type = self.file_type_box.currentText().strip()
         pattern = _EXT_MAP.get(file_type, "*.*")
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "처리할 파일 선택 (다중 선택 가능)",
-            "",
+            self.input_dir_edit.text().strip() or "",
             f"{file_type} files ({pattern});;All files (*.*)",
         )
         if not files:
             return
 
         self.selected_files = list(files)
+        self.input_dir_edit.setText(os.path.dirname(self.selected_files[0]))
         self.file_list.clear()
         for path in self.selected_files:
             item = QtWidgets.QListWidgetItem(os.path.basename(path))
