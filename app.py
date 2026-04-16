@@ -753,6 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("File Preprocessor (PySide6)")
         self.resize(1040, 780)
+        self.settings = QtCore.QSettings("preproc", "file_preprocessor")
 
         self.selected_files: list[str] = []
         self.custom_labels: dict[str, list[str]] | None = None
@@ -773,15 +774,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_type_box.addItems(FILE_TYPES)
         row.addWidget(self.file_type_box)
         row.addSpacing(12)
-        row.addWidget(QtWidgets.QLabel("입력 폴더"))
-        self.input_dir_edit = QtWidgets.QLineEdit(os.getcwd())
-        row.addWidget(self.input_dir_edit, 1)
-        input_browse_btn = QtWidgets.QPushButton("찾기")
-        input_browse_btn.clicked.connect(self.browse_input)
-        row.addWidget(input_browse_btn)
-        scan_btn = QtWidgets.QPushButton("폴더 스캔")
-        scan_btn.clicked.connect(self.scan_input_directory)
-        row.addWidget(scan_btn)
+        row.addWidget(QtWidgets.QLabel("파일 선택 시작 경로"))
+        default_initial_dir = str(self.settings.value("initial_dir", os.getcwd()))
+        self.initial_dir_edit = QtWidgets.QLineEdit(default_initial_dir)
+        row.addWidget(self.initial_dir_edit, 1)
+        initial_dir_btn = QtWidgets.QPushButton("찾기")
+        initial_dir_btn.clicked.connect(self.browse_initial_dir)
+        row.addWidget(initial_dir_btn)
         pick_btn = QtWidgets.QPushButton("파일 선택(다중)")
         pick_btn.clicked.connect(self.select_files)
         row.addWidget(pick_btn)
@@ -862,48 +861,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.output_dir_edit.setText(path)
 
-    def browse_input(self):
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "입력 폴더 선택", self.input_dir_edit.text() or "/")
+    def browse_initial_dir(self):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "파일 선택 시작 경로", self.initial_dir_edit.text() or "/")
         if path:
-            self.input_dir_edit.setText(path)
-
-    def scan_input_directory(self):
-        src_dir = self.input_dir_edit.text().strip()
-        if not src_dir or not os.path.isdir(src_dir):
-            QtWidgets.QMessageBox.warning(self, "안내", "유효한 입력 폴더를 지정해 주세요.")
-            return
-
-        file_type = self.file_type_box.currentText().strip()
-        files = scan_directory(src_dir, file_type)
-        if not files:
-            QtWidgets.QMessageBox.information(self, "안내", f"{file_type} 파일을 찾지 못했습니다.")
-            return
-
-        self.selected_files = files
-        self.file_list.clear()
-        for path in self.selected_files:
-            item = QtWidgets.QListWidgetItem(os.path.basename(path))
-            item.setData(QtCore.Qt.UserRole, path)
-            self.file_list.addItem(item)
-            item.setSelected(True)
-
-        self.status_label.setText(f"{len(self.selected_files)}개 파일 선택됨")
-        self.append_log(f"[INFO] 폴더 스캔 완료: {src_dir} ({len(self.selected_files)}개)")
+            self.initial_dir_edit.setText(path)
+            self.settings.setValue("initial_dir", path)
 
     def select_files(self):
         file_type = self.file_type_box.currentText().strip()
         pattern = _EXT_MAP.get(file_type, "*.*")
+        start_dir = self.initial_dir_edit.text().strip() or str(self.settings.value("initial_dir", os.getcwd()))
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "처리할 파일 선택 (다중 선택 가능)",
-            self.input_dir_edit.text().strip() or "",
+            start_dir,
             f"{file_type} files ({pattern});;All files (*.*)",
         )
         if not files:
             return
 
         self.selected_files = list(files)
-        self.input_dir_edit.setText(os.path.dirname(self.selected_files[0]))
+        selected_dir = os.path.dirname(self.selected_files[0])
+        self.initial_dir_edit.setText(selected_dir)
+        self.settings.setValue("initial_dir", selected_dir)
         self.file_list.clear()
         for path in self.selected_files:
             item = QtWidgets.QListWidgetItem(os.path.basename(path))
@@ -1029,6 +1009,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.status_label.setText("완료: 저장된 파일 없음")
             QtWidgets.QMessageBox.warning(self, "완료", "저장된 파일이 없습니다. 로그를 확인하세요.")
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        self.settings.setValue("initial_dir", self.initial_dir_edit.text().strip() or os.getcwd())
+        self.settings.sync()
+        super().closeEvent(event)
 
 
 def main():
