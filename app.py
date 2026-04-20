@@ -219,7 +219,7 @@ def extract_parameters(
 
     def _first_v_at_threshold(threshold: float) -> float:
         s.sort_values(by=[voltage_col], inplace=True)
-        crossed = (s[curent_col] >= threshold) & (s[current_col].shift(1) < threshold)
+        crossed = (s[current_col] >= threshold) & (s[current_col].shift(1) < threshold)
         hits = s[crossed]
         if hits.empty:
             return float("nan")
