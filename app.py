@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------g------------------------
 # Constants / Defaults
 # ---------------------------------------------------------------------------
 _today = datetime.date.today().strftime("%y%m%d")
@@ -218,7 +218,7 @@ def extract_parameters(
         raise ValueError("subset에 유효한 숫자 데이터가 없습니다.")
 
     def _first_v_at_threshold(threshold: float) -> float:
-        s.sort_values(by=[voltage_col], inplace=True
+        s.sort_values(by=[voltage_col], inplace=True)
         crossed = (s[curent_col] >= threshold) & (s[current_col].shift(1) < threshold)
         hits = s[crossed]
         if hits.empty:
