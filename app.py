@@ -218,10 +218,12 @@ def extract_parameters(
         raise ValueError("subset에 유효한 숫자 데이터가 없습니다.")
 
     def _first_v_at_threshold(threshold: float) -> float:
-        hit = s[s[current_col] >= threshold]
-        if hit.empty:
+        abs_cur = s[current_col].abs()
+        crossed = (abs_cur >= threshold) & (abs_cur.shift(1) < threshold)
+        hits = s[crossed]
+        if hits.empty:
             return float("nan")
-        return float(hit.iloc[0][voltage_col])
+        return float(hits.iloc[0][voltage_col])
 
     vth = _first_v_at_threshold(thres_cur)
     vth_2 = _first_v_at_threshold(thres_cur / 10.0)
